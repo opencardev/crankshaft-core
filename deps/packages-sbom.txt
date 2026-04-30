@@ -1,0 +1,3 @@
+# Extra packages for SBOM generation
+# Installed by build.sh --install-deps when BUILD_SBOM=ON
+curl

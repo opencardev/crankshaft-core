@@ -1,0 +1,4 @@
+# Extra packages for code quality checks (cppcheck, clang-format)
+# Installed by build.sh --install-deps when CODE_QUALITY=ON
+cppcheck
+clang-format

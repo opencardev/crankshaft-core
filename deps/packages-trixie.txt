@@ -1,0 +1,31 @@
+# Build dependencies for Debian 13 (Trixie)
+# Used by build.sh --install-deps when running on Debian Trixie
+ca-certificates
+git
+build-essential
+cmake
+ninja-build
+pkg-config
+qt6-base-dev
+qt6-base-dev-tools
+qt6-declarative-dev
+qt6-declarative-dev-tools
+qt6-multimedia-dev
+qt6-connectivity-dev
+qt6-websockets-dev
+qt6-tools-dev
+qt6-tools-dev-tools
+qt6-l10n-tools
+libqt6sql6-sqlite
+libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev
+libdbus-1-dev
+libbluetooth-dev
+libusb-1.0-0-dev
+libssl-dev
+libprotobuf-dev
+protobuf-compiler
+libaasdk
+libaasdk-dev
+libboost-all-dev
+file

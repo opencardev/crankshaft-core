@@ -1,0 +1,317 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  quality-coverage-quick-build:
+    name: Quality + Coverage + Quick Build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          chmod +x ./build.sh
+          CODE_QUALITY=ON ENABLE_COVERAGE=ON BUILD_SBOM=ON ./build.sh --install-deps
+
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v4
+        with:
+          versionSpec: 6.x
+
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v4
+
+      - name: Export build version outputs
+        id: version
+        shell: bash
+        run: |
+          echo "base_version=${{ steps.gitversion.outputs.MajorMinorPatch }}" >> "${GITHUB_OUTPUT}"
+          echo "version=${{ steps.gitversion.outputs.SemVer }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run unified quality + coverage + quick package build
+        run: |
+          chmod +x ./build.sh
+          BUILD_DIR=build-quality \
+          BUILD_TESTS=ON \
+          BUILD_PACKAGE=ON \
+          BUILD_SBOM=ON \
+          CODE_QUALITY=ON \
+          FORMAT_CHECK=ON \
+          ENABLE_COVERAGE=ON \
+          WITH_AASDK=1 \
+          VERSION="${{ steps.version.outputs.version }}" \
+          ./build.sh --clean
+
+      - name: Upload quick build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: quick-build-amd64-artifacts
+          if-no-files-found: warn
+          path: |
+            build-quality/packages/*.deb
+
+      - name: Upload quick build SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: quick-build-amd64-sbom
+          if-no-files-found: error
+          path: |
+            build-quality/sbom/*.spdx.json
+
+      - name: Generate coverage reports
+        run: |
+          lcov --capture --rc geninfo_unexecuted_blocks=1 --directory build-quality --output-file build-quality/coverage.info
+          lcov --ignore-errors unused --remove build-quality/coverage.info '/usr/*' '*/tests/*' --output-file build-quality/coverage.filtered.info
+          lcov --summary build-quality/coverage.filtered.info > build-quality/coverage-summary.txt
+          genhtml build-quality/coverage.filtered.info --output-directory build-quality/coverage-html
+
+      - name: Publish coverage summary to workflow page
+        shell: bash
+        run: |
+          {
+            echo "## Test Coverage"
+            echo
+            echo "Source: build-quality/coverage.filtered.info"
+            echo
+            echo '```text'
+            cat build-quality/coverage-summary.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            build-quality/coverage.filtered.info
+            build-quality/coverage-summary.txt
+            build-quality/coverage-html/
+
+  full-multiarch-build-test:
+    name: Full Build + Unit Tests (${{ matrix.distro_id }}-${{ matrix.arch_id }})
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [quality-coverage-quick-build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu:24.04
+            distro_id: ubuntu24
+            platform: linux/amd64
+            arch_id: amd64
+          - distro: ubuntu:24.04
+            distro_id: ubuntu24
+            platform: linux/arm64
+            arch_id: arm64
+          - distro: ubuntu:24.04
+            distro_id: ubuntu24
+            platform: linux/arm/v7
+            arch_id: armhf
+          - distro: debian:trixie-slim
+            distro_id: trixie
+            platform: linux/amd64
+            arch_id: amd64
+          - distro: debian:trixie-slim
+            distro_id: trixie
+            platform: linux/arm64
+            arch_id: arm64
+          - distro: debian:trixie-slim
+            distro_id: trixie
+            platform: linux/arm/v7
+            arch_id: armhf
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU emulation
+        uses: docker/setup-qemu-action@v4
+
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v4
+        with:
+          versionSpec: 6.x
+
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v4
+
+      - name: Export build version outputs
+        id: version
+        shell: bash
+        run: |
+          echo "base_version=${{ steps.gitversion.outputs.MajorMinorPatch }}" >> "${GITHUB_OUTPUT}"
+          echo "version=${{ steps.gitversion.outputs.SemVer }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and test in multiarch Docker container
+        env:
+          DISTRO_IMAGE: ${{ matrix.distro }}
+          DISTRO_ID: ${{ matrix.distro_id }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH_ID: ${{ matrix.arch_id }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x ./build.sh
+
+          docker run --rm \
+            --platform "${PLATFORM}" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e BUILD_VERSION="${BUILD_VERSION}" \
+            -e DISTRO_ID="${DISTRO_ID}" \
+            -e ARCH_ID="${ARCH_ID}" \
+            -v "${PWD}:/work" \
+            -w /work \
+            "${DISTRO_IMAGE}" \
+            bash -lc '
+              set -euo pipefail
+              ./build.sh --install-deps
+
+              BUILD_DIR="build-${DISTRO_ID}-${ARCH_ID}" \
+              BUILD_TESTS=ON \
+              BUILD_PACKAGE=ON \
+              WITH_AASDK=1 \
+              VERSION="${BUILD_VERSION}" \
+              ./build.sh --clean
+
+              workspace_owner="$(stat -c "%u:%g" /work)"
+              chown -R "${workspace_owner}" "build-${DISTRO_ID}-${ARCH_ID}"
+            '
+
+      - name: Install syft on runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v syft >/dev/null 2>&1; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          fi
+
+      - name: Generate matrix SBOMs on runner
+        env:
+          DISTRO_ID: ${{ matrix.distro_id }}
+          ARCH_ID: ${{ matrix.arch_id }}
+        run: |
+          set -euo pipefail
+          chmod +x ./build.sh
+          BUILD_DIR="build-${DISTRO_ID}-${ARCH_ID}" \
+          BUILD_SBOM=ON \
+          ./build.sh --sbom-only
+
+      - name: Upload matrix build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-${{ matrix.distro_id }}-${{ matrix.arch_id }}-artifacts
+          if-no-files-found: error
+          path: |
+            build-${{ matrix.distro_id }}-${{ matrix.arch_id }}/packages/*.deb
+
+      - name: Upload matrix SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-${{ matrix.distro_id }}-${{ matrix.arch_id }}-sbom
+          if-no-files-found: error
+          path: |
+            build-${{ matrix.distro_id }}-${{ matrix.arch_id }}/sbom/*.spdx.json
+
+  release-notes:
+    name: Changelog and Release Notes
+    if: github.event_name == 'push'
+    needs: [quality-coverage-quick-build, full-multiarch-build-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v4
+        with:
+          versionSpec: 6.x
+
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v4
+
+      - name: Export build version outputs
+        id: version
+        shell: bash
+        run: |
+          echo "base_version=${{ steps.gitversion.outputs.MajorMinorPatch }}" >> "${GITHUB_OUTPUT}"
+          echo "version=${{ steps.gitversion.outputs.SemVer }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate changelog and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          release_version="${{ steps.version.outputs.version }}"
+
+          latest_tag="$(git tag --sort=-v:refname | head -n1 || true)"
+          if [[ -n "${latest_tag}" ]]; then
+            range="${latest_tag}..HEAD"
+          else
+            range="HEAD"
+          fi
+
+          {
+            echo "# Changelog ${release_version}"
+            echo
+            if [[ -n "${latest_tag}" ]]; then
+              echo "Version: ${release_version}"
+              echo "Changes since ${latest_tag}."
+            else
+              echo "Version: ${release_version}"
+              echo "Changes for initial release baseline."
+            fi
+            echo
+            git log ${range} --pretty='- %h %s (%an)'
+          } > changelog.md
+
+          {
+            echo "# Release Notes ${release_version}"
+            echo
+            echo "Version: ${release_version}"
+            echo
+            echo "## Highlights"
+            echo "- Automated build/test matrix across Debian Trixie and Ubuntu 24 for amd64/arm64/armhf"
+            echo "- DEB artifact export"
+            echo "- Coverage and SBOM generation"
+            echo
+            echo "## Commit Summary"
+            git log ${range} --pretty='- %s'
+          } > release-notes.md
+
+      - name: Download generated SBOM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: '*-sbom'
+          path: sbom-artifacts
+
+      - name: Upload changelog and release notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-metadata
+          path: |
+            changelog.md
+            release-notes.md
+            sbom-artifacts/

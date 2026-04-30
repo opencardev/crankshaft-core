@@ -1,0 +1,628 @@
+/*
+ * Project: Crankshaft
+ * This file is part of Crankshaft project.
+ * Copyright (C) 2025 OpenCarDev Team
+ *
+ *  Crankshaft is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  Crankshaft is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with Crankshaft. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "ServiceManager.h"
+
+#include <QTimer>
+
+#include "../../hal/functional/BluetoothManagerImpl.h"
+#include "../../hal/functional/WiFiManagerImpl.h"
+#include "../../hal/multimedia/MediaPipeline.h"
+#include "../../hal/wireless/BluetoothManager.h"
+#include "../../hal/wireless/WiFiManager.h"
+#include "../android_auto/AndroidAutoService.h"
+#include "../android_auto/WiFiManagerWirelessNetworkManager.h"
+#include "../config/ConfigService.h"
+#include "../logging/Logger.h"
+#include "../profile/ProfileManager.h"
+
+ServiceManager::ServiceManager(ProfileManager* profileManager, QObject* parent)
+    : QObject(parent),
+      m_profileManager(profileManager),
+      m_androidAutoService(nullptr),
+      m_wifiManager(nullptr),
+      m_bluetoothManager(nullptr),
+        m_mediaPipeline(nullptr),
+        m_wifiManagerFactory([](QObject* parent) { return new WiFiManagerImpl(nullptr, parent); }),
+        m_bluetoothManagerFactory(
+          [](QObject* parent) { return new BluetoothManagerImpl(nullptr, parent); }) {
+  if (!m_profileManager) {
+    Logger::instance().error("[ServiceManager] ProfileManager is null");
+    return;
+  }
+
+  // Connect to profile change signals
+  connect(m_profileManager, &ProfileManager::hostProfileChanged, this,
+          &ServiceManager::onProfileChanged);
+  connect(m_profileManager, &ProfileManager::deviceConfigChanged, this,
+          &ServiceManager::onDeviceConfigChanged);
+
+  Logger::instance().info("[ServiceManager] ServiceManager initialised");
+}
+
+ServiceManager::~ServiceManager() {
+  Logger::instance().info("[ServiceManager] Shutting down ServiceManager");
+  stopAllServices();
+}
+
+bool ServiceManager::startAllServices() {
+  if (!m_profileManager) {
+    Logger::instance().error("[ServiceManager] Cannot start services: ProfileManager is null");
+    return false;
+  }
+
+  HostProfile activeProfile = m_profileManager->getActiveHostProfile();
+  Logger::instance().info(QString("[ServiceManager] Starting services for profile: %1 (%2)")
+                              .arg(activeProfile.name, activeProfile.id));
+  Logger::instance().info(QString("[ServiceManager] Profile has %1 device(s) configured")
+                              .arg(activeProfile.devices.size()));
+
+  bool anyStarted = false;
+  int successCount = 0;
+  int failCount = 0;
+
+  for (const auto& device : activeProfile.devices) {
+    Logger::instance().info(
+        QString("[ServiceManager] Processing device: %1 (type: %2, enabled: %3, useMock: %4)")
+            .arg(device.name)
+            .arg(device.type)
+            .arg(device.enabled ? "true" : "false")
+            .arg(device.useMock ? "true" : "false"));
+
+    if (!device.enabled) {
+      Logger::instance().info(
+          QString("[ServiceManager]   → Skipping disabled device: %1").arg(device.name));
+      continue;
+    }
+
+    bool started = false;
+    if (device.type == "AndroidAuto" || device.name == "AndroidAuto") {
+      started = startAndroidAutoService(device);
+    } else if (device.type == "WiFi" || device.name == "WiFi") {
+      started = startWiFiService(device);
+    } else if (device.type == "Bluetooth" || device.name == "Bluetooth") {
+      started = startBluetoothService(device);
+    } else {
+      Logger::instance().warning(
+          QString("[ServiceManager]   → Unknown device type: %1 (skipping)").arg(device.type));
+      continue;
+    }
+
+    if (started) {
+      successCount++;
+      anyStarted = true;
+      emit serviceStarted(device.name, true);
+    } else {
+      failCount++;
+      emit serviceStarted(device.name, false);
+    }
+  }
+
+  Logger::instance().info(
+      QString("[ServiceManager] Service startup complete: %1 started, %2 failed")
+          .arg(successCount)
+          .arg(failCount));
+  Logger::instance().info(
+      QString("[ServiceManager] Services running: AndroidAuto=%1, WiFi=%2, Bluetooth=%3")
+          .arg(m_androidAutoService ? "yes" : "no")
+          .arg(m_wifiManager ? "yes" : "no")
+          .arg(m_bluetoothManager ? "yes" : "no"));
+
+  return anyStarted;
+}
+
+void ServiceManager::stopAllServices() {
+  Logger::instance().info("[ServiceManager] Stopping all services...");
+
+  stopAndroidAutoService();
+  stopWiFiService();
+  stopBluetoothService();
+  stopMediaPipeline();
+
+  Logger::instance().info("[ServiceManager] All services stopped");
+}
+
+void ServiceManager::reloadServices() {
+  Logger::instance().info("[ServiceManager] Reloading services from profile configuration...");
+
+  stopAllServices();
+  startAllServices();
+
+  emit servicesReloaded();
+  Logger::instance().info("[ServiceManager] Services reloaded successfully");
+}
+
+bool ServiceManager::startService(const QString& deviceName) {
+  if (!m_profileManager) {
+    Logger::instance().error(
+        QString("[ServiceManager] Cannot start service '%1': ProfileManager is null")
+            .arg(deviceName));
+    return false;
+  }
+
+  HostProfile activeProfile = m_profileManager->getActiveHostProfile();
+
+  for (const auto& device : activeProfile.devices) {
+    if (device.name == deviceName || device.type == deviceName) {
+      if (!device.enabled) {
+        Logger::instance().warning(
+            QString("[ServiceManager] Cannot start disabled service: %1").arg(deviceName));
+        return false;
+      }
+
+      Logger::instance().info(QString("[ServiceManager] Starting service: %1").arg(deviceName));
+
+      bool started = false;
+      if (device.type == "AndroidAuto" || device.name == "AndroidAuto") {
+        started = startAndroidAutoService(device);
+      } else if (device.type == "WiFi" || device.name == "WiFi") {
+        started = startWiFiService(device);
+      } else if (device.type == "Bluetooth" || device.name == "Bluetooth") {
+        started = startBluetoothService(device);
+      }
+
+      emit serviceStarted(deviceName, started);
+      return started;
+    }
+  }
+
+  Logger::instance().error(
+      QString("[ServiceManager] Device not found in profile: %1").arg(deviceName));
+
+  if (deviceName == QStringLiteral("Bluetooth")) {
+    Logger::instance().warning(
+        "[ServiceManager] Bluetooth not present in active profile, starting fallback Bluetooth service");
+    DeviceConfig fallbackBluetooth;
+    fallbackBluetooth.name = QStringLiteral("Bluetooth");
+    fallbackBluetooth.type = QStringLiteral("Bluetooth");
+    fallbackBluetooth.enabled = true;
+    fallbackBluetooth.useMock = false;
+
+    const bool started = startBluetoothService(fallbackBluetooth);
+    emit serviceStarted(deviceName, started);
+    return started;
+  }
+
+  return false;
+}
+
+bool ServiceManager::stopService(const QString& deviceName) {
+  Logger::instance().info(QString("[ServiceManager] Stopping service: %1").arg(deviceName));
+
+  if (deviceName == "AndroidAuto") {
+    stopAndroidAutoService();
+  } else if (deviceName == "WiFi") {
+    stopWiFiService();
+  } else if (deviceName == "Bluetooth") {
+    stopBluetoothService();
+  } else {
+    Logger::instance().warning(
+        QString("[ServiceManager] Unknown service name: %1").arg(deviceName));
+    return false;
+  }
+
+  emit serviceStopped(deviceName);
+  return true;
+}
+
+bool ServiceManager::restartService(const QString& deviceName) {
+  Logger::instance().info(QString("[ServiceManager] Restarting service: %1").arg(deviceName));
+
+  stopService(deviceName);
+  return startService(deviceName);
+}
+
+bool ServiceManager::isServiceRunning(const QString& deviceName) const {
+  if (deviceName == "AndroidAuto") {
+    return m_androidAutoService != nullptr;
+  } else if (deviceName == "WiFi") {
+    return m_wifiManager != nullptr;
+  } else if (deviceName == "Bluetooth") {
+    return m_bluetoothManager != nullptr;
+  }
+  return false;
+}
+
+QStringList ServiceManager::getRunningServices() const {
+  QStringList running;
+  if (m_androidAutoService) running.append("AndroidAuto");
+  if (m_wifiManager) running.append("WiFi");
+  if (m_bluetoothManager) running.append("Bluetooth");
+  return running;
+}
+
+void ServiceManager::onProfileChanged(const QString& profileId) {
+  Logger::instance().info(
+      QString("[ServiceManager] Active profile changed to: %1, reloading services...")
+          .arg(profileId));
+  reloadServices();
+}
+
+void ServiceManager::onDeviceConfigChanged(const QString& profileId, const QString& deviceName) {
+  // Only reload if this is the active profile
+  HostProfile activeProfile = m_profileManager->getActiveHostProfile();
+  if (activeProfile.id == profileId) {
+    Logger::instance().info(
+        QString("[ServiceManager] Device config changed: %1, restarting service...")
+            .arg(deviceName));
+    restartService(deviceName);
+  }
+}
+
+bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
+  Logger::instance().info(QString("[ServiceManager]   → Starting AndroidAuto service (%1)")
+                              .arg(device.useMock ? "Mock" : "Real/AASDK"));
+
+  // Stop existing instance if running
+  if (m_androidAutoService) {
+    Logger::instance().info("[ServiceManager]      Stopping existing AndroidAuto instance");
+    stopAndroidAutoService();
+  }
+
+  // Create MediaPipeline if needed for Real service
+  if (!device.useMock && !m_mediaPipeline) {
+    Logger::instance().info("[ServiceManager]      Creating MediaPipeline for Real AndroidAuto");
+    m_mediaPipeline = new MediaPipeline(this);
+    MediaConfig config{};  // Use defaults until profiles provide detailed config
+    if (!m_mediaPipeline->start(config)) {
+      Logger::instance().error("[ServiceManager]      Failed to start MediaPipeline");
+      delete m_mediaPipeline;
+      m_mediaPipeline = nullptr;
+      return false;
+    }
+    Logger::instance().info("[ServiceManager]      MediaPipeline started successfully");
+  }
+
+  m_androidAutoService = AndroidAutoService::create(m_mediaPipeline, m_profileManager, this);
+  if (!m_androidAutoService) {
+    Logger::instance().error("[ServiceManager]      Failed to create AndroidAuto service instance");
+    return false;
+  }
+
+  if (m_wifiManager) {
+    m_androidAutoService->setWirelessNetworkManager(
+        std::make_shared<WiFiManagerWirelessNetworkManager>(m_wifiManager));
+  } else {
+    Logger::instance().warning(
+        "[ServiceManager]      WiFi manager not running; wireless hotspot orchestration unavailable");
+  }
+
+  // Configure transport settings (USB/Wireless mode)
+  m_androidAutoService->configureTransport(device.settings);
+
+  if (!m_androidAutoService->initialise()) {
+    Logger::instance().error("[ServiceManager]      Failed to initialise AndroidAuto service");
+    delete m_androidAutoService;
+    m_androidAutoService = nullptr;
+    return false;
+  }
+
+  Logger::instance().info(
+      QString("[ServiceManager]      AndroidAuto service started successfully (%1)")
+          .arg(device.useMock ? "Mock mode" : "Real mode"));
+
+  m_androidAutoProjectionReady = false;
+  m_androidAutoControlVersionReceived = false;
+  m_androidAutoServiceDiscoveryCompleted = false;
+  m_androidAutoConnectedDuringStartup = false;
+
+  connect(m_androidAutoService, &AndroidAutoService::projectionStatusChanged, this,
+          [this](const QJsonObject& status) {
+            m_androidAutoProjectionReady =
+                status.value(QStringLiteral("projection_ready")).toBool(false);
+            m_androidAutoControlVersionReceived =
+                status.value(QStringLiteral("control_version_received")).toBool(false);
+            m_androidAutoServiceDiscoveryCompleted =
+                status.value(QStringLiteral("service_discovery_completed")).toBool(false);
+          });
+
+  connect(m_androidAutoService, &AndroidAutoService::connectionStateChanged, this,
+          [this](AndroidAutoService::ConnectionState state) {
+            if (state == AndroidAutoService::ConnectionState::CONNECTED) {
+              m_androidAutoConnectedDuringStartup = true;
+            }
+
+            if (state == AndroidAutoService::ConnectionState::DISCONNECTED ||
+                state == AndroidAutoService::ConnectionState::DISCONNECTING ||
+                state == AndroidAutoService::ConnectionState::ERROR) {
+              m_androidAutoProjectionReady = false;
+              m_androidAutoControlVersionReceived = false;
+              m_androidAutoServiceDiscoveryCompleted = false;
+            }
+          });
+
+  // Log channel configuration if available
+  if (device.settings.contains("channels.video")) {
+    Logger::instance().info(
+        QString("[ServiceManager]      Channel config: video=%1, mediaAudio=%2, input=%3")
+            .arg(device.settings["channels.video"].toBool() ? "enabled" : "disabled")
+            .arg(device.settings["channels.mediaAudio"].toBool() ? "enabled" : "disabled")
+            .arg(device.settings["channels.input"].toBool() ? "enabled" : "disabled"));
+  }
+
+  // Begin device discovery/connection based on transport settings
+  if (!m_androidAutoService->startSearching()) {
+    Logger::instance().warning(
+        "[ServiceManager]      AndroidAuto: startSearching() returned false");
+  } else {
+    Logger::instance().info(
+        "[ServiceManager]      AndroidAuto: searching for devices (USB/Wireless)");
+  }
+
+  const bool forceRenegotiateOnStartup =
+      device.settings
+          .value("force_renegotiate_on_startup",
+                 ConfigService::instance()
+                     .get("core.android_auto.force_renegotiate_on_startup", false)
+                     .toBool())
+          .toBool();
+  const int renegotiateDelayMs =
+      qBound(5000,
+             device.settings
+                 .value("renegotiate_on_startup_delay_ms",
+                        ConfigService::instance()
+                            .get("core.android_auto.renegotiate_on_startup_delay_ms", 12000)
+                            .toInt())
+                 .toInt(),
+             30000);
+  const int relaunchDelayMs =
+      qBound(1500,
+             device.settings
+                 .value("renegotiate_relaunch_delay_ms",
+                        ConfigService::instance()
+                            .get("core.android_auto.renegotiate_relaunch_delay_ms", 2500)
+                            .toInt())
+                 .toInt(),
+             30000);
+  const int readinessGraceDelayMs =
+      qBound(2000,
+             device.settings
+                 .value("renegotiate_readiness_grace_delay_ms",
+                        ConfigService::instance()
+                            .get("core.android_auto.renegotiate_readiness_grace_delay_ms", 10000)
+                            .toInt())
+                 .toInt(),
+             60000);
+
+  if (forceRenegotiateOnStartup) {
+    Logger::instance().info(
+        QString("[ServiceManager]      AndroidAuto: startup readiness check in %1 ms "
+                "(grace %2 ms, relaunch delay %3 ms)")
+            .arg(renegotiateDelayMs)
+            .arg(readinessGraceDelayMs)
+            .arg(relaunchDelayMs));
+
+    QTimer::singleShot(renegotiateDelayMs, this, [this, relaunchDelayMs, readinessGraceDelayMs]() {
+      if (!m_androidAutoService) {
+        return;
+      }
+
+      const auto hasProjectionProgress = [this]() {
+        return m_androidAutoProjectionReady || m_androidAutoControlVersionReceived ||
+               m_androidAutoServiceDiscoveryCompleted;
+      };
+
+      const auto triggerRenegotiation = [this, relaunchDelayMs]() {
+        if (!m_androidAutoService) {
+          return;
+        }
+
+        Logger::instance().info(
+            "[ServiceManager]      AndroidAuto: startup renegotiation step 1/2 -> disconnect");
+        m_androidAutoService->disconnect();
+
+        QTimer::singleShot(relaunchDelayMs, this, [this]() {
+          if (!m_androidAutoService) {
+            return;
+          }
+
+          Logger::instance().info(
+              "[ServiceManager]      AndroidAuto: startup renegotiation step 2/2 -> "
+              "startSearching");
+          if (!m_androidAutoService->startSearching()) {
+            Logger::instance().warning(
+                "[ServiceManager]      AndroidAuto: renegotiation startSearching() returned false");
+          }
+        });
+      };
+
+      const auto stateBeforeRenegotiate = m_androidAutoService->getConnectionState();
+      if (m_androidAutoConnectedDuringStartup) {
+        Logger::instance().info(
+            "[ServiceManager]      AndroidAuto: startup renegotiation skipped (already connected "
+            "once this startup)");
+        return;
+      }
+
+      if (stateBeforeRenegotiate == AndroidAutoService::ConnectionState::CONNECTED &&
+          hasProjectionProgress()) {
+        Logger::instance().info(
+            "[ServiceManager]      AndroidAuto: startup renegotiation skipped (ready/progressed)");
+        return;
+      }
+
+      if (stateBeforeRenegotiate == AndroidAutoService::ConnectionState::CONNECTING ||
+          stateBeforeRenegotiate == AndroidAutoService::ConnectionState::AUTHENTICATING ||
+          stateBeforeRenegotiate == AndroidAutoService::ConnectionState::SECURING ||
+          stateBeforeRenegotiate == AndroidAutoService::ConnectionState::CONNECTED) {
+        Logger::instance().info(
+            QString("[ServiceManager]      AndroidAuto: startup renegotiation deferred by %1 ms "
+                    "(state still negotiating/not-ready)")
+                .arg(readinessGraceDelayMs));
+
+        QTimer::singleShot(readinessGraceDelayMs, this, [this, triggerRenegotiation]() {
+          if (!m_androidAutoService) {
+            return;
+          }
+
+          if (m_androidAutoConnectedDuringStartup) {
+            Logger::instance().info(
+                "[ServiceManager]      AndroidAuto: startup renegotiation skipped after grace "
+                "(already connected once this startup)");
+            return;
+          }
+
+          const auto hasProjectionProgressAfterGrace = [this]() {
+            return m_androidAutoProjectionReady || m_androidAutoControlVersionReceived ||
+                   m_androidAutoServiceDiscoveryCompleted;
+          };
+
+          const auto stateAfterGrace = m_androidAutoService->getConnectionState();
+          if ((stateAfterGrace == AndroidAutoService::ConnectionState::CONNECTED &&
+               hasProjectionProgressAfterGrace()) ||
+              stateAfterGrace == AndroidAutoService::ConnectionState::AUTHENTICATING ||
+              stateAfterGrace == AndroidAutoService::ConnectionState::SECURING) {
+            Logger::instance().info(
+                "[ServiceManager]      AndroidAuto: startup renegotiation skipped after grace "
+                "(connection progressed)");
+            return;
+          }
+
+          triggerRenegotiation();
+        });
+        return;
+      }
+
+      triggerRenegotiation();
+    });
+  }
+
+  return true;
+}
+
+bool ServiceManager::startWiFiService(const DeviceConfig& device) {
+  Logger::instance().info(QString("[ServiceManager]   → Starting WiFi service (%1)")
+                              .arg(device.useMock ? "Mock" : "Real"));
+
+  // Stop existing instance if running
+  if (m_wifiManager) {
+    Logger::instance().info("[ServiceManager]      Stopping existing WiFi instance");
+    stopWiFiService();
+  }
+
+  if (device.useMock) {
+    Logger::instance().warning(
+        "[ServiceManager] WiFi mock manager is not available; using real WiFi manager backend");
+  }
+
+  if (!m_wifiManagerFactory) {
+    Logger::instance().error("[ServiceManager] WiFi manager factory is not configured");
+    return false;
+  }
+
+  m_wifiManager = m_wifiManagerFactory(this);
+  if (!m_wifiManager) {
+    Logger::instance().error("[ServiceManager] WiFi manager factory returned null");
+    return false;
+  }
+
+  if (!m_wifiManager->initialise()) {
+    Logger::instance().error("[ServiceManager] WiFi manager failed to initialise");
+    delete m_wifiManager;
+    m_wifiManager = nullptr;
+    return false;
+  }
+
+  Logger::instance().info("[ServiceManager] WiFi service started successfully");
+  return true;
+}
+
+bool ServiceManager::startBluetoothService(const DeviceConfig& device) {
+  Logger::instance().info(QString("[ServiceManager]   → Starting Bluetooth service (%1)")
+                              .arg(device.useMock ? "Mock" : "Real"));
+
+  // Stop existing instance if running
+  if (m_bluetoothManager) {
+    Logger::instance().info("[ServiceManager]      Stopping existing Bluetooth instance");
+    stopBluetoothService();
+  }
+
+  if (device.useMock) {
+    Logger::instance().warning("[ServiceManager] Bluetooth mock manager is not available; using "
+                               "real Bluetooth manager backend");
+  }
+
+  if (!m_bluetoothManagerFactory) {
+    Logger::instance().error("[ServiceManager] Bluetooth manager factory is not configured");
+    return false;
+  }
+
+  m_bluetoothManager = m_bluetoothManagerFactory(this);
+  if (!m_bluetoothManager) {
+    Logger::instance().error("[ServiceManager] Bluetooth manager factory returned null");
+    return false;
+  }
+
+  if (!m_bluetoothManager->initialise()) {
+    Logger::instance().error("[ServiceManager] Bluetooth manager failed to initialise");
+    delete m_bluetoothManager;
+    m_bluetoothManager = nullptr;
+    return false;
+  }
+
+  Logger::instance().info("[ServiceManager] Bluetooth service started successfully");
+  return true;
+}
+
+void ServiceManager::stopAndroidAutoService() {
+  if (m_androidAutoService) {
+    Logger::instance().info("[ServiceManager] Stopping AndroidAuto service");
+    m_androidAutoService->deinitialise();
+    delete m_androidAutoService;
+    m_androidAutoService = nullptr;
+    Logger::instance().info("[ServiceManager] AndroidAuto service stopped");
+  }
+
+  if (m_mediaPipeline) {
+    Logger::instance().info("[ServiceManager] Stopping MediaPipeline");
+    m_mediaPipeline->stop();
+    delete m_mediaPipeline;
+    m_mediaPipeline = nullptr;
+  }
+}
+
+void ServiceManager::stopWiFiService() {
+  if (m_wifiManager) {
+    Logger::instance().info("[ServiceManager] Stopping WiFi service");
+    m_wifiManager->deinitialise();
+    delete m_wifiManager;
+    m_wifiManager = nullptr;
+    Logger::instance().info("[ServiceManager] WiFi service stopped");
+  }
+}
+
+void ServiceManager::stopBluetoothService() {
+  if (m_bluetoothManager) {
+    Logger::instance().info("[ServiceManager] Stopping Bluetooth service");
+    m_bluetoothManager->deinitialise();
+    delete m_bluetoothManager;
+    m_bluetoothManager = nullptr;
+    Logger::instance().info("[ServiceManager] Bluetooth service stopped");
+  }
+}
+
+void ServiceManager::stopMediaPipeline() {
+  if (m_mediaPipeline) {
+    Logger::instance().info("[ServiceManager] Stopping MediaPipeline");
+    m_mediaPipeline->stop();
+    delete m_mediaPipeline;
+    m_mediaPipeline = nullptr;
+    Logger::instance().info("[ServiceManager] MediaPipeline stopped");
+  }
+}

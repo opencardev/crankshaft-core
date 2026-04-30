@@ -1,0 +1,89 @@
+#!/bin/sh
+# Project: Crankshaft
+# This file is part of Crankshaft project.
+# Copyright (C) 2025 OpenCarDev Team
+#
+#  Crankshaft is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  Crankshaft is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with Crankshaft. If not, see <http://www.gnu.org/licenses/>.
+
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+case "$1" in
+    configure)
+        # Create crankshaft user if it doesn't exist.
+        if ! id -u crankshaft > /dev/null 2>&1; then
+            if command -v adduser >/dev/null 2>&1; then
+                adduser --system --group --no-create-home crankshaft || true
+            else
+                useradd --system --user-group --no-create-home --shell /usr/sbin/nologin crankshaft || true
+            fi
+        fi
+
+        # Ensure aasdk group exists so crankshaft can read aasdk TLS key material.
+        if ! getent group aasdk > /dev/null 2>&1; then
+            if command -v addgroup >/dev/null 2>&1; then
+                addgroup --system aasdk || true
+            else
+                groupadd --system aasdk || true
+            fi
+        fi
+        
+        # Create plugdev group if it doesn't exist (for USB device access)
+        if ! getent group plugdev > /dev/null 2>&1; then
+            groupadd --system plugdev || true
+        fi
+        
+        # Add crankshaft user to required groups.
+        usermod -a -G plugdev crankshaft 2>/dev/null || true
+        usermod -a -G aasdk crankshaft 2>/dev/null || true
+        
+        # Set proper ownership for config directory
+        if [ -d /etc/crankshaft ]; then
+            chown -R crankshaft:crankshaft /etc/crankshaft || true
+            chmod 755 /etc/crankshaft || true
+            [ -f /etc/crankshaft/crankshaft.json ] && chmod 644 /etc/crankshaft/crankshaft.json || true
+        fi
+        
+        # Create profiles directory
+        mkdir -p /etc/crankshaft/profiles || true
+        chown crankshaft:crankshaft /etc/crankshaft/profiles || true
+        chmod 755 /etc/crankshaft/profiles || true
+        
+        # Create runtime directories
+        mkdir -p /var/lib/crankshaft /var/log/crankshaft || true
+        chown -R crankshaft:crankshaft /var/lib/crankshaft /var/log/crankshaft || true
+        
+        # Ensure USB trigger scripts are executable
+        [ -f /usr/lib/crankshaft/aa_discovery_trigger.sh ] && chmod +x /usr/lib/crankshaft/aa_discovery_trigger.sh || true
+        
+        # Reload udev rules
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger 2>/dev/null || true
+        
+        # Reload systemd and enable service when running under systemd
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable crankshaft-core.service >/dev/null 2>&1 || true
+        else
+            echo "Systemd not detected; skipping service enable." >&2
+        fi
+        
+        echo "Crankshaft Core installed successfully"
+        echo "Service enabled and will start on boot"
+        echo "USB device detection and AA trigger configured"
+        echo "To start now: sudo systemctl start crankshaft-core"
+    ;;
+esac
+
+exit 0

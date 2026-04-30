@@ -1,0 +1,3 @@
+# Extra packages for coverage reporting (lcov)
+# Installed by build.sh --install-deps when ENABLE_COVERAGE=ON
+lcov

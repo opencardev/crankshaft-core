@@ -1,0 +1,63 @@
+{
+  "core": {
+    "websocket": {
+      "port": 8080,
+      "host": "0.0.0.0"
+    },
+    "android_auto": {
+      "startup_profile": "compat_openauto_profile",
+      "compat_openauto_profile": true,
+      "logging": {
+        "enabled": true,
+        "level": "debug",
+        "file_path": "/var/log/crankshaft/android_auto.log",
+        "verbose_usb": false,
+        "channel_debug": true
+      },
+      "usb": {
+        "startup_detection_delay_ms": 0,
+        "initial_scan_delay_ms": 100,
+        "scan_interval_fast_ms": 1000,
+        "scan_interval_slow_ms": 3000,
+        "scan_slowdown_after_ms": 15000,
+        "pre_session_reset_enabled": true,
+        "cleanup_reset_enabled": true
+      },
+      "channels": {
+        "all_enabled": true,
+        "video_enabled": true,
+        "media_audio_enabled": true,
+        "system_audio_enabled": true,
+        "speech_audio_enabled": true,
+        "telephony_audio_enabled": false,
+        "microphone_enabled": true,
+        "input_enabled": true,
+        "sensor_enabled": true,
+        "bluetooth_enabled": true
+      },
+      "control": {
+        "version_request_max_attempts": 10,
+        "version_request_recovery_ms": 120000,
+        "version_request_retry_delay_ms": 750
+      },
+      "force_renegotiate_on_startup": false,
+      "renegotiate_on_startup_delay_ms": 12000,
+      "renegotiate_readiness_grace_delay_ms": 10000,
+      "renegotiate_relaunch_delay_ms": 2500
+    },
+    "logging": {
+      "level": "info",
+      "file": "/var/log/crankshaft/crankshaft.log"
+    },
+    "bluetooth": {
+      "discovery_timeout_seconds": 60
+    }
+  },
+  "ui": {
+    "theme": "light",
+    "language": "en-GB",
+    "websocket": {
+      "server": "ws://localhost:8080"
+    }
+  }
+}
