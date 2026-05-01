@@ -313,6 +313,10 @@ if [[ -n "${CMAKE_EXTRA_ARGS}" ]]; then
   cmake_args+=("${extra_args[@]}")
 fi
 
+if [[ -n "${VERSION:-}" ]]; then
+  cmake_args+=("-DCRANKSHAFT_CORE_VERSION_OVERRIDE=${VERSION}")
+fi
+
 log "Configuring (${BUILD_TYPE}) from ${SOURCE_DIR} into ${BUILD_DIR}"
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja "${cmake_args[@]}"
 
