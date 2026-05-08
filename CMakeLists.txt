@@ -323,5 +323,5 @@ install(FILES ${CMAKE_SOURCE_DIR}/packaging/core/crankshaft-core.service
 
 # Ensure Debian package includes runtime shared-library dependencies.
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64, libqt6core6, libqt6network6, libqt6websockets6, libqt6gui6, libqt6dbus6, libqt6sql6, libqt6bluetooth6, libqt6multimedia6, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, dbus, libusb-1.0-0, libssl3, libprotobuf32, libasound2, libpulse0")
 set(CPACK_COMPONENTS_ALL core)
