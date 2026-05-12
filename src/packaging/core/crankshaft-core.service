@@ -17,7 +17,7 @@
 
 [Unit]
 Description=Crankshaft Core Service
-Documentation=https://github.com/opencardev/crankshaft.core
+Documentation=https://github.com/opencardev/crankshaft-core
 After=network.target
 Wants=network.target
 
