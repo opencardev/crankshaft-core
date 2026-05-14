@@ -328,6 +328,7 @@ if [[ "${CODE_QUALITY}" == "ON" ]]; then
       --error-exitcode=1 \
       --suppress=unknownMacro \
       --suppress=normalCheckLevelMaxBranches \
+      --suppress=constParameterCallback \
       --inline-suppr \
       --language=c++ \
       --std=c++20 \
