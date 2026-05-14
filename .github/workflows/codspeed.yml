@@ -1,0 +1,39 @@
+name: CodSpeed
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+  # `workflow_dispatch` allows CodSpeed to trigger backtest
+  # performance analysis in order to generate initial data.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build benchmarks
+        run: |
+          cmake -S src/benchmarks -B build-bench \
+            -DCODSPEED_MODE=simulation \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-bench --parallel $(nproc)
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: ./build-bench/crankshaft-benchmarks
