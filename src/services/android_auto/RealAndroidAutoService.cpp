@@ -3021,8 +3021,7 @@ void RealAndroidAutoService::setupChannels() {
 
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
-                [this](int width, int height, const uint8_t* data, int size) {
-                  Q_UNUSED(data)
+          [this](int width, int height, const QByteArray& frameData) {
                   m_videoDecodedFrameCount++;
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
@@ -3031,7 +3030,7 @@ void RealAndroidAutoService::setupChannels() {
                         QString("sample=%1 decoded frame size=%2 resolution=%3x%4 state=%5 "
                                 "videoStarted=%6 firstFrameFlag=%7")
                             .arg(m_videoDecodedFrameCount)
-                            .arg(size)
+                            .arg(frameData.size())
                             .arg(width)
                             .arg(height)
                             .arg(connectionStateToString(m_state))
@@ -3039,7 +3038,7 @@ void RealAndroidAutoService::setupChannels() {
                             .arg(m_videoFrameReceived ? QStringLiteral("true")
                                                       : QStringLiteral("false")));
                   }
-                  emit videoFrameReady(width, height, data, size);
+                  emit videoFrameReady(width, height, frameData);
                 });
 
         connect(m_videoDecoder.get(), &IVideoDecoder::errorOccurred, this,
@@ -3248,8 +3247,7 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
 
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
-                [this](int width, int height, const uint8_t* data, int size) {
-                  Q_UNUSED(data)
+          [this](int width, int height, const QByteArray& frameData) {
                   m_videoDecodedFrameCount++;
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
@@ -3258,7 +3256,7 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
                         QString("sample=%1 decoded frame size=%2 resolution=%3x%4 state=%5 "
                                 "videoStarted=%6 firstFrameFlag=%7")
                             .arg(m_videoDecodedFrameCount)
-                            .arg(size)
+                            .arg(frameData.size())
                             .arg(width)
                             .arg(height)
                             .arg(connectionStateToString(m_state))
@@ -3266,7 +3264,7 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
                             .arg(m_videoFrameReceived ? QStringLiteral("true")
                                                       : QStringLiteral("false")));
                   }
-                  emit videoFrameReady(width, height, data, size);
+                  emit videoFrameReady(width, height, frameData);
                 });
 
         connect(m_videoDecoder.get(), &IVideoDecoder::errorOccurred, this,
@@ -5638,7 +5636,12 @@ void RealAndroidAutoService::onVideoFrame(const uint8_t* data, int size, int wid
     return;
   }
 
-  emit videoFrameReady(width, height, data, size);
+  if (!data || size <= 0) {
+    return;
+  }
+
+  const QByteArray frameData(reinterpret_cast<const char*>(data), size);
+  emit videoFrameReady(width, height, frameData);
   updateStats();
 }
 

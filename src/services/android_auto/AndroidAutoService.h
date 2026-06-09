@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QSize>
@@ -230,10 +231,9 @@ class AndroidAutoService : public QObject {
    * @brief Emitted when video frame is ready for rendering
    * @param width Frame width
    * @param height Frame height
-   * @param data Frame buffer (RGBA)
-   * @param size Buffer size in bytes
+   * @param frameData Frame buffer (RGBA)
    */
-  void videoFrameReady(int width, int height, const uint8_t* data, int size);
+  void videoFrameReady(int width, int height, const QByteArray& frameData);
 
   /**
    * @brief Emitted when audio data is available

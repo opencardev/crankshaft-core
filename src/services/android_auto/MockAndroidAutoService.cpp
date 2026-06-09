@@ -330,10 +330,8 @@ void MockAndroidAutoService::generateTestVideoFrame() {
 
   // Convert to RGBA buffer
   QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
-  const uint8_t* data = rgba.constBits();
-  int size = rgba.sizeInBytes();
-
-  emit videoFrameReady(m_resolution.width(), m_resolution.height(), data, size);
+  const QByteArray frameData(reinterpret_cast<const char*>(rgba.constBits()), rgba.sizeInBytes());
+  emit videoFrameReady(m_resolution.width(), m_resolution.height(), frameData);
 }
 
 void MockAndroidAutoService::generateTestAudioData() {

@@ -927,12 +927,13 @@ void WebSocketServer::onAndroidAutoError(const QString& error) {
   broadcastEvent("android-auto/status/error", payload);
 }
 
-void WebSocketServer::onAndroidAutoVideoFrameReady(int width, int height, const uint8_t* data,
-                                                   int size) {
-  if (width <= 0 || height <= 0 || !data || size <= 0) {
+void WebSocketServer::onAndroidAutoVideoFrameReady(int width, int height,
+                                                   const QByteArray& frameData) {
+  if (width <= 0 || height <= 0 || frameData.isEmpty()) {
     return;
   }
 
+  const int size = frameData.size();
   const qint64 requiredRgbaBytes = static_cast<qint64>(width) * static_cast<qint64>(height) * 4;
   if (requiredRgbaBytes <= 0 || static_cast<qint64>(size) < requiredRgbaBytes) {
     Logger::instance().warning(
@@ -959,8 +960,7 @@ void WebSocketServer::onAndroidAutoVideoFrameReady(int width, int height, const 
   }
   m_lastVideoFrameBroadcastMs = nowMs;
 
-  const QByteArray frameBytes(reinterpret_cast<const char*>(data), size);
-  QImage frame(reinterpret_cast<const uchar*>(frameBytes.constData()), width, height,
+  QImage frame(reinterpret_cast<const uchar*>(frameData.constData()), width, height,
                QImage::Format_RGBA8888);
   QImage frameCopy = frame.copy();
   if (frameCopy.isNull()) {

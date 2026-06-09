@@ -323,8 +323,9 @@ GstFlowReturn GStreamerVideoDecoder::onNewSample(GstAppSink* appsink, gpointer u
   QMutexLocker locker(&decoder->m_mutex);
   decoder->m_decodedFrames++;
 
-  // Emit signal with frame data
-  emit decoder->frameDecoded(width, height, map.data, map.size);
+  // Copy frame bytes so downstream receivers never reference unmapped GStreamer memory.
+  const QByteArray frameData(reinterpret_cast<const char*>(map.data), map.size);
+  emit decoder->frameDecoded(width, height, frameData);
 
   // Emit statistics every 30 frames
   if (decoder->m_decodedFrames % 30 == 0) {

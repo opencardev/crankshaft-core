@@ -92,10 +92,9 @@ class IVideoDecoder : public QObject {
    * @brief Emitted when a frame is successfully decoded
    * @param width Frame width
    * @param height Frame height
-   * @param data Decoded frame data (format specified in config)
-   * @param size Data size in bytes
+   * @param frameData Decoded frame data (format specified in config)
    */
-  void frameDecoded(int width, int height, const uint8_t* data, int size);
+  void frameDecoded(int width, int height, const QByteArray& frameData);
 
   /**
    * @brief Emitted when decoder error occurs

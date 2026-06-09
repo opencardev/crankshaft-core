@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <QList>
@@ -262,7 +263,7 @@ class WebSocketServer : public QObject {
   /// Relay: AndroidAuto service error occurred
   void onAndroidAutoError(const QString& error);
   /// Relay: AndroidAuto video frame ready
-  void onAndroidAutoVideoFrameReady(int width, int height, const uint8_t* data, int size);
+  void onAndroidAutoVideoFrameReady(int width, int height, const QByteArray& frameData);
   /// Relay: AndroidAuto audio chunk ready
   void onAndroidAutoAudioDataReady(const QByteArray& data);
   /// Relay: AndroidAuto projection channel status changed
