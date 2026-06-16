@@ -219,15 +219,18 @@ set_target_properties(crankshaft-core PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/core
 )
 
-target_link_libraries(crankshaft-core-lib PRIVATE
+target_link_libraries(crankshaft-core-lib PUBLIC
   Qt6::Core
+  Qt6::Multimedia
+)
+
+target_link_libraries(crankshaft-core-lib PRIVATE
   Qt6::Network
   Qt6::WebSockets
   Qt6::Gui
   Qt6::DBus
   Qt6::Bluetooth
   Qt6::Sql
-  Qt6::Multimedia
   ${GSTREAMER_LIBRARIES}
   ${GSTREAMER_APP_LIBRARIES}
   ${GSTREAMER_VIDEO_LIBRARIES}

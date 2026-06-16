@@ -97,7 +97,8 @@ bool AudioRouter::initialize() {
   // Enumerate available devices
   const auto& devices = QMediaDevices::audioOutputs();
   Logger::instance().info(
-      QString::asprintf("[AudioRouter] Found %lu audio output devices", devices.size()));
+      QString::asprintf("[AudioRouter] Found %lld audio output devices",
+              static_cast<long long>(devices.size())));
 
   for (const auto& device : devices) {
     Logger::instance().debug(QStringLiteral("[AudioRouter] Device: %1 (%2 channels)")
