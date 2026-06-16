@@ -126,7 +126,7 @@ jobs:
 
       - name: Generate coverage reports
         run: |
-          lcov --capture --rc geninfo_unexecuted_blocks=1 --directory build-quality --output-file build-quality/coverage.info
+          lcov --capture --ignore-errors mismatch --rc geninfo_unexecuted_blocks=1 --directory build-quality --output-file build-quality/coverage.info
           lcov --ignore-errors unused --remove build-quality/coverage.info '/usr/*' '*/tests/*' --output-file build-quality/coverage.filtered.info
           lcov --summary build-quality/coverage.filtered.info > build-quality/coverage-summary.txt
           genhtml build-quality/coverage.filtered.info --output-directory build-quality/coverage-html
