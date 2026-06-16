@@ -78,6 +78,8 @@ bool AudioRouter::initialize() {
   }
 
   Logger::instance().info(QStringLiteral("[AudioRouter] Initialising audio router"));
+  m_pipewireAvailable = false;
+  m_pulseaudioAvailable = false;
 
   // Try PipeWire first (modern, preferred backend)
   if (initializePipeWire()) {
@@ -103,8 +105,8 @@ bool AudioRouter::initialize() {
                                  .arg(device.maximumChannelCount()));
   }
 
-  m_initialized = true;
-  return true;
+  m_initialized = m_pipewireAvailable || m_pulseaudioAvailable;
+  return m_initialized;
 }
 
 bool AudioRouter::initializePipeWire() {
@@ -376,6 +378,8 @@ bool AudioRouter::shutdown() {
   }
 
   m_initialized = false;
+  m_pipewireAvailable = false;
+  m_pulseaudioAvailable = false;
   return true;
 }
 
