@@ -144,6 +144,16 @@ class AudioRouter : public QObject {
   auto initializePipeWire() -> bool;
 
   /**
+   * @brief Ensure a usable backend is available, retrying after startup races.
+   */
+  auto ensureAudioBackendReady(const char* callerTag) -> bool;
+
+  /**
+   * @brief Determine whether enough time has elapsed for a retry.
+   */
+  auto shouldRetryInitialization() const -> bool;
+
+  /**
    * @brief Initialize PulseAudio backend
    */
   auto initializePulseAudio() -> bool;
@@ -190,4 +200,11 @@ class AudioRouter : public QObject {
   // Backend detection
   bool m_pipewireAvailable = false;
   bool m_pulseaudioAvailable = false;
+
+  // Backend retry bookkeeping (ms since epoch)
+  qint64 m_lastInitializeAttemptMs = 0;
+  qint64 m_lastInitializeFailureLogMs = 0;
+
+  static constexpr qint64 kInitializeRetryIntervalMs = 5000;
+  static constexpr qint64 kInitializeFailureLogIntervalMs = 15000;
 };
