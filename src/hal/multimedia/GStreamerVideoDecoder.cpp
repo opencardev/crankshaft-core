@@ -285,18 +285,19 @@ bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
   if (m_config.fps > 0) {
     // Compute duration from fps
     GstClockTime duration = gst_util_uint64_scale_int(GST_SECOND, 1, m_config.fps);
-    gst_buffer_set_duration(buffer, duration);
+    GST_BUFFER_DURATION(buffer) = duration;
 
     // Set PTS using pipeline clock (monotonic)
     GstClock* clock = gst_element_get_clock(m_pipeline);
     if (clock) {
       GstClockTime now = gst_clock_get_time(clock);
       GstClockTime base = gst_element_get_base_time(m_pipeline);
-      gst_buffer_set_pts(buffer, now - base);
+      GST_BUFFER_PTS(buffer) = now - base;
       gst_object_unref(clock);
     }
     // If clock not available, do-timestamp on appsrc will timestamp automatically.
   }
+  
   memcpy(map.data, encodedData.data(), encodedData.size());
   gst_buffer_unmap(buffer, &map);
 
