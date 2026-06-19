@@ -92,17 +92,25 @@ bool GStreamerVideoDecoder::createPipeline() {
     return false;
   }
 
-  // Configure appsrc
-  g_object_set(G_OBJECT(m_appSrc), "stream-type", GST_APP_STREAM_TYPE_STREAM, "format",
-               GST_FORMAT_TIME, "is-live", TRUE, "max-bytes",
-               static_cast<guint64>(10 * 1024 * 1024),  // 10MB buffer
+  // Configure appsrc (enable automatic timestamps)
+  g_object_set(G_OBJECT(m_appSrc),
+               "stream-type", GST_APP_STREAM_TYPE_STREAM,
+               "format", GST_FORMAT_TIME,
+               "is-live", TRUE,
+               "max-bytes", static_cast<guint64>(10 * 1024 * 1024),  // 10MB buffer
+               "do-timestamp", TRUE,
                nullptr);
-
+  
   // Set H.264 caps on appsrc
   // Android Auto payloads can arrive as fragmented NAL units. Using nal alignment avoids
   // strict access-unit assumptions that can trigger not-negotiated pipeline failures.
-  GstCaps* caps = gst_caps_new_simple("video/x-h264", "stream-format", G_TYPE_STRING, "byte-stream",
-                                      "alignment", G_TYPE_STRING, "nal", nullptr);
+  // Set H.264 caps on appsrc (add framerate if known)
+  GstCaps* caps = gst_caps_new_simple("video/x-h264",
+                                      "stream-format", G_TYPE_STRING, "byte-stream",
+                                      "alignment", G_TYPE_STRING, "nal",
+                                      // optional: advertise framerate for negotiation
+                                      // "framerate", GST_TYPE_FRACTION, m_config.fps, 1,
+                                      nullptr);
   g_object_set(G_OBJECT(m_appSrc), "caps", caps, nullptr);
   gst_caps_unref(caps);
 
@@ -110,6 +118,14 @@ bool GStreamerVideoDecoder::createPipeline() {
   m_h264Parse = gst_element_factory_make("h264parse", "parser");
   if (!m_h264Parse) {
     Logger::instance().error("Failed to create h264parse");
+    return false;
+  }
+
+  // Create queue elements to decouple pipeline stages
+  GstElement* queue1 = gst_element_factory_make("queue", "queue1");
+  GstElement* queue2 = gst_element_factory_make("queue", "queue2");
+  if (!queue1 || !queue2) {
+    Logger::instance().error("Failed to create queue elements");
     return false;
   }
 
@@ -144,16 +160,23 @@ bool GStreamerVideoDecoder::createPipeline() {
   // Configure appsink
   // Keep sink caps flexible (format-only) because actual stream resolution is negotiated
   // from SPS/PPS and may differ from requested UI resolution.
+  // Configure appsink: use pipeline clock for sync and allow small buffering
   GstCaps* sinkCaps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGBA", nullptr);
-  g_object_set(G_OBJECT(m_appSink), "emit-signals", TRUE, "sync", FALSE, "max-buffers", 1, "drop",
-               TRUE, "caps", sinkCaps, nullptr);
+  g_object_set(G_OBJECT(m_appSink),
+               "emit-signals", TRUE,
+               "sync", TRUE,          // let the pipeline clock drive presentation
+               "max-buffers", 3,     // small buffer to avoid drops/flicker
+               "drop", FALSE,        // avoid dropping frames prematurely
+               "caps", sinkCaps,
+               nullptr);
   gst_caps_unref(sinkCaps);
 
   // Connect new-sample signal
   g_signal_connect(m_appSink, "new-sample", G_CALLBACK(onNewSample), this);
 
-  // Add elements to pipeline
-  gst_bin_add_many(GST_BIN(m_pipeline), m_appSrc, m_h264Parse, m_decoder, m_videoConvert, m_appSink,
+  // Add elements to pipeline (include queues)
+  gst_bin_add_many(GST_BIN(m_pipeline),
+                   m_appSrc, m_h264Parse, queue1, m_decoder, queue2, m_videoConvert, m_appSink,
                    nullptr);
 
   // Link elements
@@ -161,16 +184,10 @@ bool GStreamerVideoDecoder::createPipeline() {
     Logger::instance().error("Failed to link appsrc to h264parse");
     return false;
   }
-
-  if (!gst_element_link(m_h264Parse, m_decoder)) {
-    Logger::instance().error("Failed to link h264parse to decoder");
-    return false;
-  }
-
-  if (!gst_element_link(m_decoder, m_videoConvert)) {
-    Logger::instance().error("Failed to link decoder to videoconvert");
-    return false;
-  }
+  if (!gst_element_link(m_h264Parse, queue1)) { Logger::instance().error("Failed to link h264parse to queue1"); return false; }
+  if (!gst_element_link(queue1, m_decoder)) { Logger::instance().error("Failed to link queue1 to decoder"); return false; }
+  if (!gst_element_link(m_decoder, queue2)) { Logger::instance().error("Failed to link decoder to queue2"); return false; }
+  if (!gst_element_link(queue2, m_videoConvert)) { Logger::instance().error("Failed to link queue2 to videoconvert"); return false; }
 
   if (!gst_element_link(m_videoConvert, m_appSink)) {
     Logger::instance().error("Failed to link videoconvert to appsink");
@@ -264,7 +281,22 @@ bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
     m_droppedFrames++;
     return false;
   }
+  // After copying data to buffer (before push)
+  if (m_config.fps > 0) {
+    // Compute duration from fps
+    GstClockTime duration = gst_util_uint64_scale_int(GST_SECOND, 1, m_config.fps);
+    gst_buffer_set_duration(buffer, duration);
 
+    // Set PTS using pipeline clock (monotonic)
+    GstClock* clock = gst_element_get_clock(m_pipeline);
+    if (clock) {
+      GstClockTime now = gst_clock_get_time(clock);
+      GstClockTime base = gst_element_get_base_time(m_pipeline);
+      gst_buffer_set_pts(buffer, now - base);
+      gst_object_unref(clock);
+    }
+    // If clock not available, do-timestamp on appsrc will timestamp automatically.
+  }
   memcpy(map.data, encodedData.data(), encodedData.size());
   gst_buffer_unmap(buffer, &map);
 
