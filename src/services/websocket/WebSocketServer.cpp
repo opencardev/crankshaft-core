@@ -275,6 +275,15 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
       } else if (topic == QStringLiteral("android-auto/disconnect") ||
                  topic == QStringLiteral("android-auto/terminate")) {
         aaService->disconnect();
+      } else if (topic == QStringLiteral("android-auto/display/resolution")) {
+        // Dynamic display resolution update from client to configure scaling on the server.
+        const int width = payload.value(QStringLiteral("width")).toInt();
+        const int height = payload.value(QStringLiteral("height")).toInt();
+        if (width > 0 && height > 0) {
+          Logger::instance().info(
+              QString("[WebSocketServer] Received display resolution update from UI: %1x%2").arg(width).arg(height));
+          aaService->setDisplayResolution(QSize(width, height));
+        }
       } else if (topic == QStringLiteral("android-auto/touch")) {
         const QSize displayResolution = aaService->getDisplayResolution();
         const double rawX = payload.value(QStringLiteral("x")).toDouble();

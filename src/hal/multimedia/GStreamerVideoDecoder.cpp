@@ -23,26 +23,58 @@
 
 #include "../../services/logging/Logger.h"
 
-GStreamerVideoDecoder::GStreamerVideoDecoder(QObject* parent) : IVideoDecoder(parent) {
+GStreamerVideoDecoder::GStreamerVideoDecoder(QObject *parent) : IVideoDecoder(parent)
+{
   // Initialize GStreamer
   gst_init(nullptr, nullptr);
   Logger::instance().info("GStreamerVideoDecoder created");
 }
 
-GStreamerVideoDecoder::~GStreamerVideoDecoder() {
+GStreamerVideoDecoder::~GStreamerVideoDecoder()
+{
   // Virtual function calls in destructors are avoided
   // Smart pointers will clean up automatically
 }
 
-bool GStreamerVideoDecoder::initialize(const DecoderConfig& config) {
-  if (m_isInitialized) {
+void GStreamerVideoDecoder::detectDisplayResolution()
+{
+  // Since the core runs as a headless backend daemon, the physical display resolution
+  // is supplied dynamically by the UI client over WebSocket and passed here via m_config.
+  if (m_config.width > 0 && m_config.height > 0)
+  {
+    m_displayWidth = m_config.width;
+    m_displayHeight = m_config.height;
+    Logger::instance().info(QString("GStreamerVideoDecoder: Scaling output to UI-supplied display resolution: %1x%2")
+                                .arg(m_displayWidth)
+                                .arg(m_displayHeight));
+  }
+  else
+  {
+    // Default fallback to standard 1080p if no config is valid
+    m_displayWidth = 1920;
+    m_displayHeight = 1080;
+    Logger::instance().warning(QString("GStreamerVideoDecoder: No valid resolution info, defaulting to standard: %1x%2")
+                                   .arg(m_displayWidth)
+                                   .arg(m_displayHeight));
+  }
+}
+
+bool GStreamerVideoDecoder::initialize(const DecoderConfig &config)
+{
+  if (m_isInitialized)
+  {
     Logger::instance().warning("GStreamerVideoDecoder already initialized");
     return false;
   }
 
   m_config = config;
 
-  if (!createPipeline()) {
+  // Detect display resolution prior to constructing the GStreamer pipeline
+  // to ensure correct scaling properties.
+  detectDisplayResolution();
+
+  if (!createPipeline())
+  {
     Logger::instance().error("Failed to create GStreamer pipeline");
     emit errorOccurred("Failed to create decoder pipeline");
     return false;
@@ -50,7 +82,8 @@ bool GStreamerVideoDecoder::initialize(const DecoderConfig& config) {
 
   // Start pipeline
   GstStateChangeReturn ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
-  if (ret == GST_STATE_CHANGE_FAILURE) {
+  if (ret == GST_STATE_CHANGE_FAILURE)
+  {
     Logger::instance().error("Failed to start GStreamer pipeline");
     destroyPipeline();
     emit errorOccurred("Failed to start decoder pipeline");
@@ -67,8 +100,10 @@ bool GStreamerVideoDecoder::initialize(const DecoderConfig& config) {
   return true;
 }
 
-void GStreamerVideoDecoder::deinitialize() {
-  if (!m_isInitialized) {
+void GStreamerVideoDecoder::deinitialize()
+{
+  if (!m_isInitialized)
+  {
     return;
   }
 
@@ -77,17 +112,20 @@ void GStreamerVideoDecoder::deinitialize() {
   Logger::instance().info("GStreamerVideoDecoder deinitialized");
 }
 
-bool GStreamerVideoDecoder::createPipeline() {
+bool GStreamerVideoDecoder::createPipeline()
+{
   // Create pipeline
   m_pipeline = gst_pipeline_new("video-decoder");
-  if (!m_pipeline) {
+  if (!m_pipeline)
+  {
     Logger::instance().error("Failed to create pipeline");
     return false;
   }
 
   // Create appsrc for feeding encoded data
   m_appSrc = gst_element_factory_make("appsrc", "source");
-  if (!m_appSrc) {
+  if (!m_appSrc)
+  {
     Logger::instance().error("Failed to create appsrc");
     return false;
   }
@@ -97,15 +135,15 @@ bool GStreamerVideoDecoder::createPipeline() {
                "stream-type", GST_APP_STREAM_TYPE_STREAM,
                "format", GST_FORMAT_TIME,
                "is-live", TRUE,
-               "max-bytes", static_cast<guint64>(10 * 1024 * 1024),  // 10MB buffer
+               "max-bytes", static_cast<guint64>(10 * 1024 * 1024), // 10MB buffer
                "do-timestamp", TRUE,
                nullptr);
-  
+
   // Set H.264 caps on appsrc
   // Android Auto payloads can arrive as fragmented NAL units. Using nal alignment avoids
   // strict access-unit assumptions that can trigger not-negotiated pipeline failures.
   // Set H.264 caps on appsrc (add framerate if known)
-  GstCaps* caps = gst_caps_new_simple("video/x-h264",
+  GstCaps *caps = gst_caps_new_simple("video/x-h264",
                                       "stream-format", G_TYPE_STRING, "byte-stream",
                                       "alignment", G_TYPE_STRING, "nal",
                                       // optional: advertise framerate for negotiation
@@ -116,15 +154,17 @@ bool GStreamerVideoDecoder::createPipeline() {
 
   // Create h264parse
   m_h264Parse = gst_element_factory_make("h264parse", "parser");
-  if (!m_h264Parse) {
+  if (!m_h264Parse)
+  {
     Logger::instance().error("Failed to create h264parse");
     return false;
   }
 
   // Create queue elements to decouple pipeline stages
-  GstElement* queue1 = gst_element_factory_make("queue", "queue1");
-  GstElement* queue2 = gst_element_factory_make("queue", "queue2");
-  if (!queue1 || !queue2) {
+  GstElement *queue1 = gst_element_factory_make("queue", "queue1");
+  GstElement *queue2 = gst_element_factory_make("queue", "queue2");
+  if (!queue1 || !queue2)
+  {
     Logger::instance().error("Failed to create queue elements");
     return false;
   }
@@ -132,27 +172,44 @@ bool GStreamerVideoDecoder::createPipeline() {
   // Create decoder (try hardware first, fall back to software)
   QString decoderName = getDecoderElement();
   m_decoder = gst_element_factory_make(decoderName.toStdString().c_str(), "decoder");
-  if (!m_decoder) {
+  if (!m_decoder)
+  {
     Logger::instance().warning(
         QString("Hardware decoder %1 not available, falling back to avdec_h264").arg(decoderName));
     m_decoder = gst_element_factory_make("avdec_h264", "decoder");
   }
 
-  if (!m_decoder) {
+  if (!m_decoder)
+  {
     Logger::instance().error("Failed to create decoder");
     return false;
   }
 
   // Create videoconvert for format conversion
   m_videoConvert = gst_element_factory_make("videoconvert", "convert");
-  if (!m_videoConvert) {
+  if (!m_videoConvert)
+  {
     Logger::instance().error("Failed to create videoconvert");
     return false;
   }
 
+  //  Create videoscale for intelligent resolution matching
+  m_videoScale = gst_element_factory_make("videoscale", "scale");
+  if (!m_videoScale)
+  {
+    Logger::instance().error("Failed to create videoscale");
+    return false;
+  }
+
+  // Configure videoscale to use high-quality scaling (linear interpolation)
+  g_object_set(G_OBJECT(m_videoScale),
+               "method", 1, // 0=nearest, 1=linear (smooth scaling)
+               nullptr);
+
   // Create appsink for receiving decoded frames
   m_appSink = gst_element_factory_make("appsink", "sink");
-  if (!m_appSink) {
+  if (!m_appSink)
+  {
     Logger::instance().error("Failed to create appsink");
     return false;
   }
@@ -160,13 +217,18 @@ bool GStreamerVideoDecoder::createPipeline() {
   // Configure appsink
   // Keep sink caps flexible (format-only) because actual stream resolution is negotiated
   // from SPS/PPS and may differ from requested UI resolution.
-  // Configure appsink: use pipeline clock for sync and allow small buffering
-  GstCaps* sinkCaps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGBA", nullptr);
+  // Configure appsink with explicit resolution matching the detected display (HDMI/DSI)
+  // to avoid resolution mismatches and HDMI output flickering.
+  GstCaps* sinkCaps = gst_caps_new_simple("video/x-raw", 
+                                          "format", G_TYPE_STRING, "RGBA",
+                                          "width", G_TYPE_INT, m_displayWidth,
+                                          "height", G_TYPE_INT, m_displayHeight,
+                                          nullptr);
   g_object_set(G_OBJECT(m_appSink),
                "emit-signals", TRUE,
-               "sync", TRUE,          // let the pipeline clock drive presentation
-               "max-buffers", 3,     // small buffer to avoid drops/flicker
-               "drop", FALSE,        // avoid dropping frames prematurely
+               "sync", TRUE,     // let the pipeline clock drive presentation
+               "max-buffers", 3, // small buffer to avoid drops/flicker
+               "drop", FALSE,    // avoid dropping frames prematurely
                "caps", sinkCaps,
                nullptr);
   gst_caps_unref(sinkCaps);
@@ -176,26 +238,49 @@ bool GStreamerVideoDecoder::createPipeline() {
 
   // Add elements to pipeline (include queues)
   gst_bin_add_many(GST_BIN(m_pipeline),
-                   m_appSrc, m_h264Parse, queue1, m_decoder, queue2, m_videoConvert, m_appSink,
+                   m_appSrc, m_h264Parse, queue1, m_decoder, queue2, m_videoScale, m_videoConvert, m_appSink,
                    nullptr);
 
   // Link elements
-  if (!gst_element_link(m_appSrc, m_h264Parse)) {
+  if (!gst_element_link(m_appSrc, m_h264Parse))
+  {
     Logger::instance().error("Failed to link appsrc to h264parse");
     return false;
   }
-  if (!gst_element_link(m_h264Parse, queue1)) { Logger::instance().error("Failed to link h264parse to queue1"); return false; }
-  if (!gst_element_link(queue1, m_decoder)) { Logger::instance().error("Failed to link queue1 to decoder"); return false; }
-  if (!gst_element_link(m_decoder, queue2)) { Logger::instance().error("Failed to link decoder to queue2"); return false; }
-  if (!gst_element_link(queue2, m_videoConvert)) { Logger::instance().error("Failed to link queue2 to videoconvert"); return false; }
+  if (!gst_element_link(m_h264Parse, queue1))
+  {
+    Logger::instance().error("Failed to link h264parse to queue1");
+    return false;
+  }
+  if (!gst_element_link(queue1, m_decoder))
+  {
+    Logger::instance().error("Failed to link queue1 to decoder");
+    return false;
+  }
+  if (!gst_element_link(m_decoder, queue2))
+  {
+    Logger::instance().error("Failed to link decoder to queue2");
+    return false;
+  }
+  if (!gst_element_link(queue2, m_videoScale))
+  {
+    Logger::instance().error("Failed to link queue2 to videoscale");
+    return false;
+  }
+  if (!gst_element_link(m_videoScale, m_videoConvert))
+  {
+    Logger::instance().error("Failed to link videoscale to videoconvert");
+    return false;
+  }
 
-  if (!gst_element_link(m_videoConvert, m_appSink)) {
+  if (!gst_element_link(m_videoConvert, m_appSink))
+  {
     Logger::instance().error("Failed to link videoconvert to appsink");
     return false;
   }
 
   // Setup bus watch for error messages
-  GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(m_pipeline));
+  GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(m_pipeline));
   gst_bus_add_watch(bus, onBusMessage, this);
   gst_object_unref(bus);
 
@@ -203,8 +288,10 @@ bool GStreamerVideoDecoder::createPipeline() {
   return true;
 }
 
-void GStreamerVideoDecoder::destroyPipeline() {
-  if (m_pipeline) {
+void GStreamerVideoDecoder::destroyPipeline()
+{
+  if (m_pipeline)
+  {
     // Stop pipeline
     gst_element_set_state(m_pipeline, GST_STATE_NULL);
 
@@ -215,6 +302,7 @@ void GStreamerVideoDecoder::destroyPipeline() {
     m_appSrc = nullptr;
     m_h264Parse = nullptr;
     m_decoder = nullptr;
+    m_videoScale = nullptr;
     m_videoConvert = nullptr;
     m_appSink = nullptr;
   }
@@ -222,17 +310,20 @@ void GStreamerVideoDecoder::destroyPipeline() {
   Logger::instance().info("GStreamer pipeline destroyed");
 }
 
-QString GStreamerVideoDecoder::getDecoderElement() const {
-  if (!m_config.hardwareAcceleration) {
-    return "avdec_h264";  // Software decoder
+QString GStreamerVideoDecoder::getDecoderElement() const
+{
+  if (!m_config.hardwareAcceleration)
+  {
+    return "avdec_h264"; // Software decoder
   }
 
   // Try to detect platform and use appropriate hardware decoder
   // Priority: VA-API > OMX > NVDEC > software
 
   // Check for VA-API support (Linux)
-  GstElement* testElement = gst_element_factory_make("vaapih264dec", nullptr);
-  if (testElement) {
+  GstElement *testElement = gst_element_factory_make("vaapih264dec", nullptr);
+  if (testElement)
+  {
     gst_object_unref(testElement);
     Logger::instance().info("Hardware decoder: vaapih264dec (VA-API)");
     return "vaapih264dec";
@@ -240,7 +331,8 @@ QString GStreamerVideoDecoder::getDecoderElement() const {
 
   // Check for OMX support (Raspberry Pi)
   testElement = gst_element_factory_make("omxh264dec", nullptr);
-  if (testElement) {
+  if (testElement)
+  {
     gst_object_unref(testElement);
     Logger::instance().info("Hardware decoder: omxh264dec (OMX)");
     return "omxh264dec";
@@ -248,7 +340,8 @@ QString GStreamerVideoDecoder::getDecoderElement() const {
 
   // Check for NVDEC support (NVIDIA)
   testElement = gst_element_factory_make("nvh264dec", nullptr);
-  if (testElement) {
+  if (testElement)
+  {
     gst_object_unref(testElement);
     Logger::instance().info("Hardware decoder: nvh264dec (NVDEC)");
     return "nvh264dec";
@@ -259,15 +352,18 @@ QString GStreamerVideoDecoder::getDecoderElement() const {
   return "avdec_h264";
 }
 
-bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
-  if (!m_isInitialized || !m_appSrc) {
+bool GStreamerVideoDecoder::decodeFrame(const QByteArray &encodedData)
+{
+  if (!m_isInitialized || !m_appSrc)
+  {
     Logger::instance().warning("Decoder not initialized");
     return false;
   }
 
   // Create GStreamer buffer from encoded data
-  GstBuffer* buffer = gst_buffer_new_allocate(nullptr, encodedData.size(), nullptr);
-  if (!buffer) {
+  GstBuffer *buffer = gst_buffer_new_allocate(nullptr, encodedData.size(), nullptr);
+  if (!buffer)
+  {
     Logger::instance().error("Failed to allocate GStreamer buffer");
     m_droppedFrames++;
     return false;
@@ -275,21 +371,24 @@ bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
 
   // Copy data to buffer
   GstMapInfo map;
-  if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+  if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE))
+  {
     Logger::instance().error("Failed to map GStreamer buffer");
     gst_buffer_unref(buffer);
     m_droppedFrames++;
     return false;
   }
   // After copying data to buffer (before push)
-  if (m_config.fps > 0) {
+  if (m_config.fps > 0)
+  {
     // Compute duration from fps
     GstClockTime duration = gst_util_uint64_scale_int(GST_SECOND, 1, m_config.fps);
     GST_BUFFER_DURATION(buffer) = duration;
 
     // Set PTS using pipeline clock (monotonic)
-    GstClock* clock = gst_element_get_clock(m_pipeline);
-    if (clock) {
+    GstClock *clock = gst_element_get_clock(m_pipeline);
+    if (clock)
+    {
       GstClockTime now = gst_clock_get_time(clock);
       GstClockTime base = gst_element_get_base_time(m_pipeline);
       GST_BUFFER_PTS(buffer) = now - base;
@@ -297,13 +396,14 @@ bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
     }
     // If clock not available, do-timestamp on appsrc will timestamp automatically.
   }
-  
+
   memcpy(map.data, encodedData.data(), encodedData.size());
   gst_buffer_unmap(buffer, &map);
 
   // Push buffer to appsrc
   GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(m_appSrc), buffer);
-  if (ret != GST_FLOW_OK) {
+  if (ret != GST_FLOW_OK)
+  {
     Logger::instance().error(
         QString("Failed to push buffer to appsrc: %1").arg(static_cast<int>(ret)));
     m_droppedFrames++;
@@ -313,41 +413,47 @@ bool GStreamerVideoDecoder::decodeFrame(const QByteArray& encodedData) {
   return true;
 }
 
-GstFlowReturn GStreamerVideoDecoder::onNewSample(GstAppSink* appsink, gpointer user_data) {
-  GStreamerVideoDecoder* decoder = static_cast<GStreamerVideoDecoder*>(user_data);
-  if (!decoder) {
+GstFlowReturn GStreamerVideoDecoder::onNewSample(GstAppSink *appsink, gpointer user_data)
+{
+  GStreamerVideoDecoder *decoder = static_cast<GStreamerVideoDecoder *>(user_data);
+  if (!decoder)
+  {
     return GST_FLOW_ERROR;
   }
 
   // Pull sample from appsink
-  GstSample* sample = gst_app_sink_pull_sample(appsink);
-  if (!sample) {
+  GstSample *sample = gst_app_sink_pull_sample(appsink);
+  if (!sample)
+  {
     return GST_FLOW_ERROR;
   }
 
   // Get buffer from sample
-  GstBuffer* buffer = gst_sample_get_buffer(sample);
-  if (!buffer) {
+  GstBuffer *buffer = gst_sample_get_buffer(sample);
+  if (!buffer)
+  {
     gst_sample_unref(sample);
     return GST_FLOW_ERROR;
   }
 
   // Get caps from sample
-  GstCaps* caps = gst_sample_get_caps(sample);
-  if (!caps) {
+  GstCaps *caps = gst_sample_get_caps(sample);
+  if (!caps)
+  {
     gst_sample_unref(sample);
     return GST_FLOW_ERROR;
   }
 
   // Extract width and height
-  GstStructure* structure = gst_caps_get_structure(caps, 0);
+  GstStructure *structure = gst_caps_get_structure(caps, 0);
   int width = 0, height = 0;
   gst_structure_get_int(structure, "width", &width);
   gst_structure_get_int(structure, "height", &height);
 
   // Map buffer
   GstMapInfo map;
-  if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+  if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
+  {
     gst_sample_unref(sample);
     return GST_FLOW_ERROR;
   }
@@ -357,13 +463,14 @@ GstFlowReturn GStreamerVideoDecoder::onNewSample(GstAppSink* appsink, gpointer u
   decoder->m_decodedFrames++;
 
   // Copy frame bytes so downstream receivers never reference unmapped GStreamer memory.
-  const QByteArray frameData(reinterpret_cast<const char*>(map.data), map.size);
+  const QByteArray frameData(reinterpret_cast<const char *>(map.data), map.size);
   emit decoder->frameDecoded(width, height, frameData);
 
   // Emit statistics every 30 frames
-  if (decoder->m_decodedFrames % 30 == 0) {
+  if (decoder->m_decodedFrames % 30 == 0)
+  {
     emit decoder->statsUpdated(decoder->m_decodedFrames, decoder->m_droppedFrames,
-                               0.0);  // TODO: Calculate avg decode time
+                               0.0); // TODO: Calculate avg decode time
   }
 
   // Cleanup
@@ -373,68 +480,78 @@ GstFlowReturn GStreamerVideoDecoder::onNewSample(GstAppSink* appsink, gpointer u
   return GST_FLOW_OK;
 }
 
-gboolean GStreamerVideoDecoder::onBusMessage(GstBus* bus, GstMessage* message, gpointer user_data) {
-  GStreamerVideoDecoder* decoder = static_cast<GStreamerVideoDecoder*>(user_data);
-  if (!decoder) {
+gboolean GStreamerVideoDecoder::onBusMessage(GstBus *bus, GstMessage *message, gpointer user_data)
+{
+  GStreamerVideoDecoder *decoder = static_cast<GStreamerVideoDecoder *>(user_data);
+  if (!decoder)
+  {
     return TRUE;
   }
 
-  switch (GST_MESSAGE_TYPE(message)) {
-    case GST_MESSAGE_ERROR: {
-      GError* err = nullptr;
-      gchar* debug = nullptr;
-      gst_message_parse_error(message, &err, &debug);
+  switch (GST_MESSAGE_TYPE(message))
+  {
+  case GST_MESSAGE_ERROR:
+  {
+    GError *err = nullptr;
+    gchar *debug = nullptr;
+    gst_message_parse_error(message, &err, &debug);
 
-      Logger::instance().error(QString("GStreamer error: %1").arg(err->message));
-      if (debug) {
-        Logger::instance().debug(QString("Debug info: %1").arg(debug));
-      }
-
-      emit decoder->errorOccurred(QString::fromUtf8(err->message));
-
-      g_error_free(err);
-      g_free(debug);
-      break;
+    Logger::instance().error(QString("GStreamer error: %1").arg(err->message));
+    if (debug)
+    {
+      Logger::instance().debug(QString("Debug info: %1").arg(debug));
     }
 
-    case GST_MESSAGE_WARNING: {
-      GError* err = nullptr;
-      gchar* debug = nullptr;
-      gst_message_parse_warning(message, &err, &debug);
+    emit decoder->errorOccurred(QString::fromUtf8(err->message));
 
-      Logger::instance().warning(QString("GStreamer warning: %1").arg(err->message));
-      if (debug) {
-        Logger::instance().debug(QString("Debug info: %1").arg(debug));
-      }
+    g_error_free(err);
+    g_free(debug);
+    break;
+  }
 
-      g_error_free(err);
-      g_free(debug);
-      break;
+  case GST_MESSAGE_WARNING:
+  {
+    GError *err = nullptr;
+    gchar *debug = nullptr;
+    gst_message_parse_warning(message, &err, &debug);
+
+    Logger::instance().warning(QString("GStreamer warning: %1").arg(err->message));
+    if (debug)
+    {
+      Logger::instance().debug(QString("Debug info: %1").arg(debug));
     }
 
-    case GST_MESSAGE_EOS:
-      Logger::instance().info("GStreamer: End of stream");
-      break;
+    g_error_free(err);
+    g_free(debug);
+    break;
+  }
 
-    case GST_MESSAGE_STATE_CHANGED: {
-      if (GST_MESSAGE_SRC(message) == GST_OBJECT(decoder->m_pipeline)) {
-        GstState oldState, newState, pending;
-        gst_message_parse_state_changed(message, &oldState, &newState, &pending);
-        Logger::instance().debug(QString("GStreamer state changed: %1 -> %2")
-                                     .arg(gst_element_state_get_name(oldState))
-                                     .arg(gst_element_state_get_name(newState)));
-      }
-      break;
+  case GST_MESSAGE_EOS:
+    Logger::instance().info("GStreamer: End of stream");
+    break;
+
+  case GST_MESSAGE_STATE_CHANGED:
+  {
+    if (GST_MESSAGE_SRC(message) == GST_OBJECT(decoder->m_pipeline))
+    {
+      GstState oldState, newState, pending;
+      gst_message_parse_state_changed(message, &oldState, &newState, &pending);
+      Logger::instance().debug(QString("GStreamer state changed: %1 -> %2")
+                                   .arg(gst_element_state_get_name(oldState))
+                                   .arg(gst_element_state_get_name(newState)));
     }
+    break;
+  }
 
-    default:
-      break;
+  default:
+    break;
   }
 
   return TRUE;
 }
 
-void GStreamerVideoDecoder::onPadAdded(GstElement* element, GstPad* pad, gpointer data) {
+void GStreamerVideoDecoder::onPadAdded(GstElement *element, GstPad *pad, gpointer data)
+{
   // This is for dynamic pad linking if needed
   Logger::instance().debug("Pad added to decoder");
 }
