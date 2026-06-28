@@ -36,6 +36,29 @@ GStreamerVideoDecoder::~GStreamerVideoDecoder()
   // Smart pointers will clean up automatically
 }
 
+void GStreamerVideoDecoder::detectDisplayResolution()
+{
+  // Since the core runs as a headless backend daemon, the physical display resolution
+  // is supplied dynamically by the UI client over WebSocket and passed here via m_config.
+  if (m_config.width > 0 && m_config.height > 0)
+  {
+    m_displayWidth = m_config.width;
+    m_displayHeight = m_config.height;
+    Logger::instance().info(QString("GStreamerVideoDecoder: Scaling output to UI-supplied display resolution: %1x%2")
+                                .arg(m_displayWidth)
+                                .arg(m_displayHeight));
+  }
+  else
+  {
+    // Default fallback to standard 1080p if no config is valid
+    m_displayWidth = 1920;
+    m_displayHeight = 1080;
+    Logger::instance().warning(QString("GStreamerVideoDecoder: No valid resolution info, defaulting to standard: %1x%2")
+                                   .arg(m_displayWidth)
+                                   .arg(m_displayHeight));
+  }
+}
+
 bool GStreamerVideoDecoder::initialize(const DecoderConfig &config)
 {
   if (m_isInitialized)
@@ -45,6 +68,10 @@ bool GStreamerVideoDecoder::initialize(const DecoderConfig &config)
   }
 
   m_config = config;
+
+  // Detect display resolution prior to constructing the GStreamer pipeline
+  // to ensure correct scaling properties.
+  detectDisplayResolution();
 
   if (!createPipeline())
   {
@@ -167,14 +194,14 @@ bool GStreamerVideoDecoder::createPipeline()
   }
 
   //  Create videoscale for intelligent resolution matching
-  GstElement *m_videoScale = gst_element_factory_make("videoscale", "scale");
+  m_videoScale = gst_element_factory_make("videoscale", "scale");
   if (!m_videoScale)
   {
     Logger::instance().error("Failed to create videoscale");
     return false;
   }
 
-  // Configure videoscale to use high-quality scaling
+  // Configure videoscale to use high-quality scaling (linear interpolation)
   g_object_set(G_OBJECT(m_videoScale),
                "method", 1, // 0=nearest, 1=linear (smooth scaling)
                nullptr);
@@ -190,11 +217,12 @@ bool GStreamerVideoDecoder::createPipeline()
   // Configure appsink
   // Keep sink caps flexible (format-only) because actual stream resolution is negotiated
   // from SPS/PPS and may differ from requested UI resolution.
-  // Configure appsink with explicit resolution matching your display
+  // Configure appsink with explicit resolution matching the detected display (HDMI/DSI)
+  // to avoid resolution mismatches and HDMI output flickering.
   GstCaps* sinkCaps = gst_caps_new_simple("video/x-raw", 
                                           "format", G_TYPE_STRING, "RGBA",
-                                          "width", G_TYPE_INT, config.width,
-                                          "height", G_TYPE_INT, config.height,
+                                          "width", G_TYPE_INT, m_displayWidth,
+                                          "height", G_TYPE_INT, m_displayHeight,
                                           nullptr);
   g_object_set(G_OBJECT(m_appSink),
                "emit-signals", TRUE,
