@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - develop
+      - bugfix/*
   workflow_dispatch:
 
 permissions:
@@ -155,7 +156,7 @@ jobs:
 
   full-multiarch-build-test:
     name: Full Build + Unit Tests (${{ matrix.distro_id }}-${{ matrix.arch_id }})
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     needs: [quality-coverage-quick-build]
     runs-on: ubuntu-latest
     strategy:
