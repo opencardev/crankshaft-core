@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - develop
+      - bugfix/*
   workflow_dispatch:
 
 permissions:
