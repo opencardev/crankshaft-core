@@ -835,6 +835,11 @@ static auto isRecoverableUsbReceiveError(const aasdk::error::Error& error) -> bo
           error.getNativeCode() == kLibusbTransferInterrupted);
 }
 
+static auto isRecoverableMessengerIntertwinedChannelError(const aasdk::error::Error& error)
+    -> bool {
+  return error.getCode() == aasdk::error::ErrorCode::MESSENGER_INTERTWINED_CHANNELS;
+}
+
 static auto isOperationInProgressError(const aasdk::error::Error& error) -> bool {
   return error.getCode() == aasdk::error::ErrorCode::OPERATION_IN_PROGRESS;
 }
@@ -1514,7 +1519,7 @@ class AAControlEventHandler final
     m_service->traceControlEvent(QStringLiteral("control_handler_error"),
                                  formatAasdkErrorDetails(e));
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=control recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -1736,7 +1741,7 @@ class AAVideoEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=video recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2001,7 +2006,7 @@ class AAAudioEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=%1 recoverable receive error (code=%2 native=%3), "
                          "scheduling receive re-arm")
@@ -2104,7 +2109,7 @@ class AAInputEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=input recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2185,7 +2190,7 @@ class AASensorEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=sensor recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2344,7 +2349,7 @@ class AAMicrophoneEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=microphone recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2443,6 +2448,23 @@ class AABluetoothEventHandler final
       return;
     }
 
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=bluetooth recoverable receive error (code=%1 native=%2), "
+                         "scheduling receive re-arm")
+                     .arg(static_cast<int>(e.getCode()))
+                     .arg(e.getNativeCode()));
+      auto self = shared_from_this();
+      QTimer::singleShot(120, m_service, [self]() { self->armReceive(); });
+      return;
+    }
+
+    if (isOperationInProgressError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=bluetooth operation-in-progress, keeping current receive"));
+      return;
+    }
+
     m_service->onChannelError(QStringLiteral("bluetooth"), QString::fromStdString(e.what()));
   }
 
@@ -2529,6 +2551,23 @@ class AAWifiProjectionEventHandler final
 
   void onChannelError(const aasdk::error::Error& e) override {
     if (!m_service || m_service->m_aasdkTeardownInProgress) {
+      return;
+    }
+
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=wifiProjection recoverable receive error (code=%1 native=%2), "
+                         "scheduling receive re-arm")
+                     .arg(static_cast<int>(e.getCode()))
+                     .arg(e.getNativeCode()));
+      auto self = shared_from_this();
+      QTimer::singleShot(120, m_service, [self]() { self->armReceive(); });
+      return;
+    }
+
+    if (isOperationInProgressError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=wifiProjection operation-in-progress, keeping current receive"));
       return;
     }
 
