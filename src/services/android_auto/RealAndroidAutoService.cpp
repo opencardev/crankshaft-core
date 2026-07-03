@@ -828,10 +828,12 @@ static auto isRecoverableUsbTransferTimeout(const aasdk::error::Error& error) ->
 static auto isRecoverableUsbReceiveError(const aasdk::error::Error& error) -> bool {
   static constexpr uint32_t kLibusbTransferError = 1;
   static constexpr uint32_t kLibusbTransferTimedOut = 2;
+  static constexpr uint32_t kLibusbTransferNoDevice = 5;
   static constexpr uint32_t kLibusbTransferInterrupted = 4294967292u;  // -4
   return error.getCode() == aasdk::error::ErrorCode::USB_TRANSFER &&
          (error.getNativeCode() == kLibusbTransferError ||
           error.getNativeCode() == kLibusbTransferTimedOut ||
+          error.getNativeCode() == kLibusbTransferNoDevice ||
           error.getNativeCode() == kLibusbTransferInterrupted);
 }
 
@@ -844,9 +846,30 @@ static auto isOperationInProgressError(const aasdk::error::Error& error) -> bool
   return error.getCode() == aasdk::error::ErrorCode::OPERATION_IN_PROGRESS;
 }
 
+// Returns true when the AASDK error string represents a USB transfer error
+// with the given libusb native code (e.g. LIBUSB_TRANSFER_NO_DEVICE == 5).
 static auto isUsbTransferErrorText(const QString& errorText, uint32_t nativeCode) -> bool {
   return errorText.contains(QStringLiteral("AASDK Error: 10")) &&
          errorText.contains(QStringLiteral("Native Code: %1").arg(nativeCode));
+}
+
+// Returns true for USB receive errors that are transient and safe to recover
+// from via a receive re-arm rather than a full transport teardown.
+// Covers: LIBUSB_TRANSFER_ERROR (1), LIBUSB_TRANSFER_TIMED_OUT (2),
+//         LIBUSB_TRANSFER_NO_DEVICE (5), and LIBUSB_TRANSFER_CANCELLED (-4 / 0xFFFFFFFC).
+static auto isRecoverableUsbReceiveErrorText(const QString& errorText) -> bool {
+  static constexpr uint32_t kLibusbTransferError = 1;
+  static constexpr uint32_t kLibusbTransferTimedOut = 2;
+  static constexpr uint32_t kLibusbTransferNoDevice = 5;
+  // Native code -4 appears in log output as the signed decimal string "-4".
+  // Parenthesise to avoid operator-precedence pitfall with ||.
+  const bool isCancelledNative =
+      (errorText.contains(QStringLiteral("AASDK Error: 10")) &&
+       errorText.contains(QStringLiteral("Native Code: -4")));
+  return isUsbTransferErrorText(errorText, kLibusbTransferError) ||
+         isUsbTransferErrorText(errorText, kLibusbTransferTimedOut) ||
+         isUsbTransferErrorText(errorText, kLibusbTransferNoDevice) ||
+         isCancelledNative;
 }
 
 static auto isUsbTransferTimeoutErrorText(const QString& errorText) -> bool {
@@ -3519,10 +3542,103 @@ void RealAndroidAutoService::cleanupAASDK() {
   Logger::instance().info("AASDK components cleaned up");
 }
 
+void RealAndroidAutoService::rearmActiveReceives() {
+  // This method is the core of the flicker-suppression strategy.
+  //
+  // Background: openauto keeps its Qt/OMX video pipeline alive across USB
+  // transport hiccups. It does not tear down the video surface on every
+  // AASDK channel error — the receive on the channel is simply re-armed and
+  // the session continues. Crankshaft previously fell through to the
+  // disconnect/reconnect path even for transient USB errors, which caused
+  // the GStreamer video decoder to be deinitialized and restarted, producing
+  // the visible HDMI flicker.
+  //
+  // This method mimics openauto's behaviour: re-arm every active channel
+  // receive callback without touching the transport, messenger, cryptor,
+  // video decoder, or audio mixer. The video pipeline stays alive and the
+  // phone simply resumes streaming once the USB connection stabilises.
+
+  if (m_aasdkTeardownInProgress) {
+    aaLogDebug("channelError", "rearmActiveReceives: skipped — teardown is in progress");
+    return;
+  }
+
+  if (m_state != ConnectionState::CONNECTED) {
+    aaLogDebug("channelError",
+               QString("rearmActiveReceives: skipped — state=%1 (not CONNECTED)")
+                   .arg(connectionStateToString(m_state)));
+    return;
+  }
+
+  ++m_rearmActiveReceivesCount;
+  aaLogWarning("channelError",
+               QString("rearmActiveReceives: count=%1 state=%2 videoStarted=%3 audioStarted=%4")
+                   .arg(m_rearmActiveReceivesCount)
+                   .arg(connectionStateToString(m_state))
+                   .arg(m_videoStarted ? QStringLiteral("true") : QStringLiteral("false"))
+                   .arg(m_mediaAudioStarted ? QStringLiteral("true") : QStringLiteral("false")));
+
+  // Re-arm the control channel first so the phone can re-send any pending
+  // protocol messages (e.g. video focus, service discovery completion).
+  if (m_controlChannel && m_controlEventHandler) {
+    m_controlChannel->receive(m_controlEventHandler);
+  }
+
+  // Re-arm the video channel immediately; this is the most important receive
+  // to keep alive so the media pipeline does not stall or produce a blank frame.
+  if (m_videoChannel && m_videoEventHandler) {
+    m_videoChannel->receive(m_videoEventHandler);
+  }
+
+  // Re-arm all audio sink channels.
+  if (m_mediaAudioChannel && m_mediaAudioEventHandler) {
+    m_mediaAudioChannel->receive(m_mediaAudioEventHandler);
+  }
+  if (m_systemAudioChannel && m_systemAudioEventHandler) {
+    m_systemAudioChannel->receive(m_systemAudioEventHandler);
+  }
+  if (m_speechAudioChannel && m_speechAudioEventHandler) {
+    m_speechAudioChannel->receive(m_speechAudioEventHandler);
+  }
+  if (m_telephonyAudioChannel && m_telephonyAudioEventHandler) {
+    m_telephonyAudioChannel->receive(m_telephonyAudioEventHandler);
+  }
+
+  // Re-arm the input and sensor source channels.
+  if (m_inputChannel && m_inputEventHandler) {
+    m_inputChannel->receive(m_inputEventHandler);
+  }
+  if (m_sensorChannel && m_sensorEventHandler) {
+    m_sensorChannel->receive(m_sensorEventHandler);
+  }
+
+  // Re-arm microphone only when the session is already past the pre-start
+  // window; during AOAP negotiation the microphone is not yet active.
+  if (m_serviceDiscoveryCompleted && m_microphoneChannel && m_microphoneEventHandler) {
+    m_microphoneChannel->receive(m_microphoneEventHandler);
+  }
+
+  // Re-arm optional channels.
+  if (m_bluetoothChannel && m_bluetoothEventHandler) {
+    m_bluetoothChannel->receive(m_bluetoothEventHandler);
+  }
+  if (m_wifiProjectionChannel && m_wifiProjectionEventHandler) {
+    m_wifiProjectionChannel->receive(m_wifiProjectionEventHandler);
+  }
+
+  aaLogInfo("channelError",
+            QString("rearmActiveReceives: all active receives re-armed (count=%1)")
+                .arg(m_rearmActiveReceivesCount));
+}
+
 void RealAndroidAutoService::performImmediateTransportRecovery(const QString& reason) {
-  aaLogWarning("channelError", QString("performImmediateTransportRecovery reason=%1 state=%2")
-                                   .arg(reason)
-                                   .arg(connectionStateToString(m_state)));
+  aaLogWarning(
+      "channelError",
+      QString("performImmediateTransportRecovery reason=%1 state=%2 deviceGoneRecoveryScheduled=%3")
+          .arg(reason)
+          .arg(connectionStateToString(m_state))
+          .arg(m_deviceGoneRecoveryScheduled ? QStringLiteral("true")
+                                            : QStringLiteral("false")));
 
   if (m_deviceGoneRecoveryScheduled) {
     aaLogInfo("channelError", "Immediate transport recovery already scheduled, ignoring");
@@ -6707,11 +6823,24 @@ void RealAndroidAutoService::onChannelError(const QString& channelName, const QS
   const bool isTransferTimeout = isUsbTransferTimeoutErrorText(error);
   const bool isNoDevice =
       isUsbTransferNoDeviceErrorText(error) || isTransportNoDeviceErrorText(error);
+  const bool isRecoverableReceiveError = isRecoverableUsbReceiveErrorText(error);
   const bool isSslWrapperNoDevice = isSslWrapperNoDeviceErrorText(error);
   const bool isOperationAborted = isOperationAbortedErrorText(error);
   const bool isControlVersionTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Version request timed out after"));
+
+  if (isRecoverableReceiveError && m_state == ConnectionState::CONNECTED) {
+    aaLogWarning(
+        "channelError",
+        QString("channel=%1 state=%2 details=%3 -> recoverable transport receive error, re-arming active receives")
+            .arg(channelName)
+            .arg(connectionStateToString(m_state))
+            .arg(error));
+    rearmActiveReceives();
+    return;
+  }
+
   const bool isControlHandshakeTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Handshake activation timed out after"));
