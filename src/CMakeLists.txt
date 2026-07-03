@@ -104,6 +104,7 @@ set(CORE_SOURCES
   services/android_auto/AndroidAutoService.cpp
   services/android_auto/MockAndroidAutoService.cpp
   services/android_auto/RealAndroidAutoService.cpp
+  services/android_auto/AasdkErrorClassification.h
   services/android_auto/WiFiManagerWirelessNetworkManager.cpp
   services/android_auto/ProtocolHelpers.cpp
   services/preferences/PreferencesService.cpp

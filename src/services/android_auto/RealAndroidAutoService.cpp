@@ -17,6 +17,7 @@
  *  along with Crankshaft. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AasdkErrorClassification.h"
 #include "RealAndroidAutoService.h"
 
 #include <QDateTime>
@@ -849,8 +850,7 @@ static auto isOperationInProgressError(const aasdk::error::Error& error) -> bool
 // Returns true when the AASDK error string represents a USB transfer error
 // with the given libusb native code (e.g. LIBUSB_TRANSFER_NO_DEVICE == 5).
 static auto isUsbTransferErrorText(const QString& errorText, uint32_t nativeCode) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 10")) &&
-         errorText.contains(QStringLiteral("Native Code: %1").arg(nativeCode));
+  return crankshaft::aasdk_error_classification::isUsbTransferErrorText(errorText, nativeCode);
 }
 
 // Returns true for USB receive errors that are transient and safe to recover
@@ -858,52 +858,27 @@ static auto isUsbTransferErrorText(const QString& errorText, uint32_t nativeCode
 // Covers: LIBUSB_TRANSFER_ERROR (1), LIBUSB_TRANSFER_TIMED_OUT (2),
 //         LIBUSB_TRANSFER_NO_DEVICE (5), and LIBUSB_TRANSFER_CANCELLED (-4 / 0xFFFFFFFC).
 static auto isRecoverableUsbReceiveErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kLibusbTransferError = 1;
-  static constexpr uint32_t kLibusbTransferTimedOut = 2;
-  static constexpr uint32_t kLibusbTransferNoDevice = 5;
-  // Native code -4 appears in log output as the signed decimal string "-4".
-  // Parenthesise to avoid operator-precedence pitfall with ||.
-  const bool isCancelledNative =
-      (errorText.contains(QStringLiteral("AASDK Error: 10")) &&
-       errorText.contains(QStringLiteral("Native Code: -4")));
-  return isUsbTransferErrorText(errorText, kLibusbTransferError) ||
-         isUsbTransferErrorText(errorText, kLibusbTransferTimedOut) ||
-         isUsbTransferErrorText(errorText, kLibusbTransferNoDevice) ||
-         isCancelledNative;
+  return crankshaft::aasdk_error_classification::isRecoverableUsbReceiveErrorText(errorText);
 }
 
 static auto isUsbTransferTimeoutErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kLibusbTransferTimedOut = 2;
-  return isUsbTransferErrorText(errorText, kLibusbTransferTimedOut);
+  return crankshaft::aasdk_error_classification::isUsbTransferTimeoutErrorText(errorText);
 }
 
 static auto isUsbTransferNoDeviceErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kLibusbTransferNoDevice = 5;
-  return isUsbTransferErrorText(errorText, kLibusbTransferNoDevice);
+  return crankshaft::aasdk_error_classification::isUsbTransferNoDeviceErrorText(errorText);
 }
 
 static auto isTransportNoDeviceErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kNativeNoDevice = 5;
-
-  if (!errorText.contains(QStringLiteral("Native Code: %1").arg(kNativeNoDevice))) {
-    return false;
-  }
-
-  return errorText.contains(QStringLiteral("AASDK Error: 10")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 25")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 26")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 27")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 28")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 33"));
+  return crankshaft::aasdk_error_classification::isTransportNoDeviceErrorText(errorText);
 }
 
 static auto isSslWrapperNoDeviceErrorText(const QString& errorText) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 25")) &&
-         errorText.contains(QStringLiteral("Native Code: 5"));
+  return crankshaft::aasdk_error_classification::isSslWrapperNoDeviceErrorText(errorText);
 }
 
 static auto isOperationAbortedErrorText(const QString& errorText) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 30"));
+  return crankshaft::aasdk_error_classification::isOperationAbortedErrorText(errorText);
 }
 
 // Helper: perform USBDEVFS_RESET ioctl on a device node
