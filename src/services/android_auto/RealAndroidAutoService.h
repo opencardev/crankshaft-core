@@ -287,6 +287,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   void armAoapRetryResetWindowIfNeeded();
   void sendControlVersionRequest();
   void performImmediateTransportRecovery(const QString& reason);
+  // Re-arms the receive callbacks on every active AASDK channel without
+  // tearing down the transport. Called after a recoverable USB receive error
+  // to keep the session alive rather than triggering a full disconnect/reconnect
+  // cycle which would cause visible video pipeline disruption (flicker).
+  void rearmActiveReceives();
   void scheduleVideoFocusKickAfterServiceDiscovery();
   void armNonControlReceivesAfterControlReady();
   void armDeferredChannelReceivesAfterServiceDiscovery();
@@ -369,6 +374,9 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_preStartNudgeLastCountedEpoch{0};
   int m_preStartNudgeNative2ConsecutiveTimeouts{0};
   int m_postDiscoveryNoDeviceGraceRecoveryCount{0};
+  // Total number of times rearmActiveReceives() has fired; useful for
+  // correlating log entries during USB disconnect/reconnect investigations.
+  int m_rearmActiveReceivesCount{0};
   QTimer* m_controlPingTimer{nullptr};
   QSet<QString> m_channelReceiveArmTraceKeys;
 
