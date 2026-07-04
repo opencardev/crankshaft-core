@@ -315,6 +315,14 @@ class RealAndroidAutoService : public AndroidAutoService {
   SessionState m_sessionState{SessionState::ENDED};
   QString m_currentSessionId;
   QString m_currentDeviceId;
+
+  // m_resolution: UI display size — used ONLY for touch coordinate scaling.
+  //   Set by the UI via WebSocket "android-auto/display/resolution".
+  //   Has NO effect on the phone's H.264 stream or GStreamer pipeline.
+  // m_negotiatedVideoResolution: stream/decoder resolution — negotiated with
+  //   the phone at service-discovery time and used for GStreamer decoder init.
+  //   Set once from config via negotiatedVideoResolution() at session setup.
+  QSize m_negotiatedVideoResolution{1920, 1080};
   SessionStore* m_sessionStore{nullptr};
   QTimer* m_heartbeatTimer{nullptr};
   EventBus* m_eventBus{nullptr};
