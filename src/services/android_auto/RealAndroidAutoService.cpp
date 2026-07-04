@@ -644,6 +644,33 @@ static auto selectVideoResolution(const QSize& resolution)
   return ResolutionType::VIDEO_800x480;
 }
 
+// Returns the resolution to negotiate with the phone and use as the GStreamer
+// decoder output size.  This is intentionally independent of m_resolution
+// (the UI display size used only for touch coordinate scaling).
+//
+// We tell the phone a fixed preferred stream resolution at service discovery
+// time, before the UI has sent a display-resolution update.  Using m_resolution
+// for this caused the phone to receive VIDEO_800x480 (from the default
+// 1024x600 display size) and the decoder to initialise at the wrong size.
+// When the first IDR frame arrived at the negotiated resolution, GStreamer
+// had to renegotiate caps, producing a brief blank frame / HDMI flicker.
+//
+// The correct pattern is:
+//   negotiatedVideoResolution() -> phone negotiation + GStreamer decoder init
+//   m_resolution               -> touch coordinate scaling only
+//
+// The QML projection Image uses fillMode: PreserveAspectFit and scales the
+// decoded frames to fit the actual display, so the stream resolution and the
+// physical display resolution are fully decoupled.
+static auto negotiatedVideoResolution() -> QSize {
+  // Allow override via config; fall back to 1080p.
+  const int w = getBoundedConfigValue(
+      QStringLiteral("core.android_auto.video.negotiated_width"), 1920, 480, 1920);
+  const int h = getBoundedConfigValue(
+      QStringLiteral("core.android_auto.video.negotiated_height"), 1080, 270, 1080);
+  return QSize(w, h);
+}
+
 static auto selectVideoFrameRate(int fps)
     -> aap_protobuf::service::media::sink::message::VideoFrameRateType {
   using FrameRateType = aap_protobuf::service::media::sink::message::VideoFrameRateType;
@@ -658,6 +685,14 @@ static void appendVideoSinkFeature(
     return;
   }
 
+  // Use the negotiated stream resolution, not the UI display resolution.
+  // The phone encodes at this resolution; GStreamer decodes at this resolution.
+  // The QML Image scales the output to fit the physical display.
+  const QSize streamResolution = negotiatedVideoResolution();
+
+  const int density = getBoundedConfigValue(
+      QStringLiteral("core.android_auto.video.density_dpi"), 160, 120, 640);
+
   auto* service = response.add_channels();
   service->set_id(static_cast<uint32_t>(videoChannel->getId()));
 
@@ -667,11 +702,11 @@ static void appendVideoSinkFeature(
   mediaSink->set_available_while_in_call(true);
 
   auto* videoConfig = mediaSink->add_video_configs();
-  videoConfig->set_codec_resolution(selectVideoResolution(resolution));
+  videoConfig->set_codec_resolution(selectVideoResolution(streamResolution));
   videoConfig->set_frame_rate(selectVideoFrameRate(fps));
   videoConfig->set_width_margin(0);
   videoConfig->set_height_margin(0);
-  videoConfig->set_density(160);
+  videoConfig->set_density(density);
 }
 
 static void appendAudioSinkFeature(
@@ -3270,14 +3305,29 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
       Logger::instance().info("WiFi projection channel enabled (TCP)");
     }
 
-    // Initialize video decoder
+    // Initialize video decoder at the negotiated stream resolution.
+    // IMPORTANT: use negotiatedVideoResolution() here, not m_resolution.
+    // m_resolution holds the UI display size (for touch scaling) and defaults
+    // to 1024x600 before the UI sends an update.  Using it for the decoder
+    // caused the GStreamer pipeline to initialise at 1024x600 while the phone
+    // streams at 1920x1080, triggering a caps renegotiation on the first IDR
+    // frame that produced visible HDMI flicker.
     if (m_channelConfig.videoEnabled) {
+      const QSize streamRes = negotiatedVideoResolution();
+      m_negotiatedVideoResolution = streamRes;
+      aaLogInfo("setupChannelsWithTransport",
+                QString("video decoder init (TCP): negotiated_stream=%1x%2 display=%3x%4")
+                    .arg(streamRes.width())
+                    .arg(streamRes.height())
+                    .arg(m_resolution.width())
+                    .arg(m_resolution.height()));
+
       m_videoDecoder = std::make_unique<GStreamerVideoDecoder>(this);
 
       IVideoDecoder::DecoderConfig decoderConfig;
       decoderConfig.codec = IVideoDecoder::CodecType::H264;
-      decoderConfig.width = m_resolution.width();
-      decoderConfig.height = m_resolution.height();
+      decoderConfig.width = streamRes.width();
+      decoderConfig.height = streamRes.height();
       decoderConfig.fps = m_fps;
       decoderConfig.outputFormat = IVideoDecoder::PixelFormat::RGBA;
       decoderConfig.hardwareAcceleration = true;
@@ -4174,9 +4224,23 @@ bool RealAndroidAutoService::setDisplayResolution(const QSize& resolution) {
     return false;
   }
 
+  // m_resolution is the UI display size used ONLY for touch coordinate scaling.
+  // It has no effect on the phone's H.264 stream resolution or the GStreamer
+  // decoder pipeline — those are governed by negotiatedVideoResolution() which
+  // is fixed at session-setup time from config.
+  // Ignore repeated calls with the same value to keep the journal clean.
+  if (m_resolution == resolution) {
+    return true;
+  }
+
+  const QSize previousResolution = m_resolution;
   m_resolution = resolution;
-  Logger::instance().info(
-      QString("Display resolution set to %1x%2").arg(resolution.width()).arg(resolution.height()));
+  aaLogInfo("setDisplayResolution",
+            QString("display size updated (touch scaling only): %1x%2 -> %3x%4")
+                .arg(previousResolution.width())
+                .arg(previousResolution.height())
+                .arg(resolution.width())
+                .arg(resolution.height()));
 
   return true;
 }

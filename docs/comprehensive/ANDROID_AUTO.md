@@ -128,12 +128,107 @@ Manual checklist:
 3. Validate session DB creation and updates.
 4. Verify disconnect cleanup and service stability.
 
-## 13. Known Gaps and Follow-ups
+## 13. Video Projection Architecture
+
+### 13.1 Resolution Concepts
+
+There are **two distinct resolutions** in the Crankshaft Android Auto stack. Conflating them caused visible HDMI flicker (see `docs/bugfix-video-flicker-recovery-plan.md`).
+
+| Name | Variable | Owner | Purpose |
+|---|---|---|---|
+| **Stream / negotiated resolution** | `m_negotiatedVideoResolution` | `RealAndroidAutoService` | What we tell the phone to encode; GStreamer decoder output size |
+| **Display / UI resolution** | `m_resolution` | `RealAndroidAutoService` | Physical display size reported by UI; used **only** for touch coordinate scaling |
+
+### 13.2 Stream Resolution (negotiated with phone)
+
+Determined once at session setup by `negotiatedVideoResolution()` — a static helper that reads:
+
+```
+core.android_auto.video.negotiated_width   (default: 1920)
+core.android_auto.video.negotiated_height  (default: 1080)
+```
+
+Used in two places, both at session-setup time:
+1. `appendVideoSinkFeature()` — populates `VideoCodecResolutionType` in the AASDK `ServiceDiscoveryResponse`, telling the phone what resolution to encode H.264 at.
+2. `setupChannels()` / `setupChannelsWithTransport()` — `DecoderConfig.width` / `height` for `GStreamerVideoDecoder::initialize()`.
+
+Both sites use the same value so the phone's H.264 stream and the GStreamer caps are aligned from the first frame. No caps renegotiation occurs on IDR frames.
+
+### 13.3 Display Resolution (UI display size)
+
+Set by the UI via WebSocket topic `android-auto/display/resolution`. Stored in `m_resolution`. Used **exclusively** for touch coordinate scaling in `sendTouchInput()` and `sendKeyInput()`. It has no effect on the GStreamer pipeline or the phone's encode settings.
+
+`setDisplayResolution()` is a no-op if called with the same value to guard against UI-side storms (see §13.5).
+
+### 13.4 Projection Data Flow
+
+```
+Phone
+  │  H.264 @ negotiatedVideoResolution (e.g. 1920×1080)
+  │  (negotiated in ServiceDiscoveryResponse.VideoConfig)
+  ▼
+AASDK VideoChannel
+  │  raw H.264 NAL units
+  ▼
+RealAndroidAutoService::onVideoChannelUpdate()
+  │  submits buffer to GStreamer
+  ▼
+GStreamerVideoDecoder  (initialized at negotiatedVideoResolution)
+  │  avdec_h264 → videoscale → appsink
+  │  decoded RGBA/YUV frames
+  ▼
+IVideoDecoder::frameDecoded signal
+  ▼
+RealAndroidAutoService → emit videoFrameReady(width, height, frameData)
+  ▼
+crankshaft-ui-slim WebSocket / signal relay
+  ▼
+AndroidAutoFacade::projectionFrameUrl  (QML image provider URL)
+  ▼
+QML Image { fillMode: PreserveAspectFit }
+  │  Qt scales decoded frame to fit physical display
+  ▼
+Physical display (any resolution, independent of stream)
+```
+
+### 13.5 Known Pitfalls
+
+**Resolution storm (fixed 2026-07-04)**
+`onProjectionFrameChanged` in `AAProjectionView.qml` and `main.qml` previously fired on every decoded video frame (~30 fps), calling `updateTouchForwarderDisplaySize()` → `TouchEventForwarder::setDisplaySize()` → WebSocket publish → `setDisplayResolution()` in core, ~16× per second.  This flooded the journal and risked triggering GStreamer reconfiguration events.
+Fixed by: removing the `onProjectionFrameChanged` QML connections (`crankshaft-ui-slim/bugfix/resolution_storm`); adding `m_lastPublishedResolution` deduplication guard in `TouchEventForwarder`; adding no-op guard in `setDisplayResolution()`.
+
+**Resolution mismatch at session start (fixed 2026-07-04)**
+`m_resolution` defaulted to `1024×600`. When used for both negotiation and decoder init, the phone received `VIDEO_800x480`, the decoder started at `1024×600`, and GStreamer had to renegotiate caps when the first IDR frame arrived, causing a visible blank frame / flicker.
+Fixed by: `negotiatedVideoResolution()` helper; GStreamer always initializes at the stream resolution.
+
+**Transient USB receive errors (fixed 2026-07-04)**
+libusb native codes 1/2/5/−4 on the Pi 3 USB controller caused AASDK channel errors that fell through to the full `disconnect → cleanupChannels → GStreamer deinit/reinit` path. GStreamer teardown and restart produced the recurring flicker during active sessions.
+Fixed by: `rearmActiveReceives()` in `RealAndroidAutoService`; `isRecoverableUsbReceiveErrorText()` classifier; `AasdkErrorClassification.h` with 30 unit tests.
+
+### 13.6 Configuration Reference (video)
+
+| Key | Default | Effect |
+|---|---|---|
+| `core.android_auto.video.negotiated_width` | `1920` | Stream width offered to phone and used for GStreamer init |
+| `core.android_auto.video.negotiated_height` | `1080` | Stream height offered to phone and used for GStreamer init |
+| `core.android_auto.video.density_dpi` | `160` | DPI reported to Android Auto (affects UI element sizing on phone) |
+
+### 13.7 QML Projection Surface
+
+`crankshaft-ui-slim` displays decoded frames via `Image { fillMode: PreserveAspectFit }`. This means:
+- The stream resolution and physical display resolution are fully decoupled.
+- A 1920×1080 stream on a 1024×600 display is scaled down by Qt without any GStreamer involvement.
+- The aspect ratio is preserved; letterboxing appears if the aspect ratios differ.
+- Touch events are mapped back through `TouchEventForwarder::scaleCoordinates()` using `m_displaySize` (the physical display dimensions) and `m_androidAutoSize` (the stream resolution), so taps land at the correct position in the AA UI.
+
+## 14. Known Gaps and Follow-ups
 
 - Some paths are still heavily tied to real hardware behavior and require richer integration testing.
 - Add explicit health endpoints/metrics for channel readiness.
 - Expand documentation coverage for wireless projection and fallback behavior.
+- Investigate Pi 3 USB EPROTO (-71) errors causing phone to drop out of AOAP mode — may require USB power/signal hardware fix.
 
-## 14. Change Log Notes
+## 15. Change Log Notes
 
 - 2026-06: Documented startup dependencies and session-store environment coupling to avoid service-account path regressions.
+- 2026-07-04: Added §13 Video Projection Architecture; documented resolution separation, resolution storm fix, transient USB recovery, and configuration keys.

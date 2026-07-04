@@ -24,17 +24,24 @@ OpenAuto appears to keep the display/video surface alive across Android Auto tra
 
 ### 1. Crankshaft-core recovery logic
 - Update `src/services/android_auto/RealAndroidAutoService.cpp`:
-  - Handle recoverable transport/receive errors in video/audio/control channel handlers.
-  - Treat `AASDK::ErrorCode::MESSENGER_INTERTWINED_CHANNELS` as recoverable if it occurs during receive.
-  - Add a path to re-arm receive operations after transient errors instead of tearing down the full session.
-  - If transport restart is needed, do it without triggering display mode reconfiguration.
+  - Handle recoverable transport/receive errors in video/audio/control channel handlers. ✓
+  - Treat `AASDK::ErrorCode::MESSENGER_INTERTWINED_CHANNELS` as recoverable if it occurs during receive. ✓
+  - Add a path to re-arm receive operations after transient errors instead of tearing down the full session. ✓
+  - `setDisplayResolution()` now ignores duplicate calls and reinitializes the GStreamer decoder only on genuine resolution changes during an active session. ✓
 
-### 2. AASDK transport behavior
+### 2. Crankshaft-ui-slim — resolution storm fix (new finding)
+- Root cause discovered via live Pi logs: `onProjectionFrameChanged` in QML fired on every decoded video frame (~30 fps), calling `updateTouchForwarderDisplaySize()` → `setDisplaySize()` → WebSocket publish of `android-auto/display/resolution` at frame rate.
+- This flooded crankshaft-core with `setDisplayResolution()` calls, logging ~16×/second and potentially causing GStreamer notification cascades.
+- Fixes in `crankshaft-ui-slim/bugfix/resolution_storm`:
+  - Remove `onProjectionFrameChanged` connections from `AAProjectionView.qml` and `main.qml`. ✓
+  - Add `m_lastPublishedResolution` deduplication guard in `TouchEventForwarder::setDisplaySize()`. ✓
+
+### 3. AASDK transport behavior
 - Ensure AASDK transport layer can distinguish transient USB disconnect/reconnect from fatal session failures.
 - Prefer a soft recover/retry path for USB receive errors over a full channel/messenger restart.
 
-### 3. UI display stability
-- Confirm `crankshaft-ui-slim` does not reselect physical display mode when video temporarily stops.
+### 4. UI display stability
+- Confirmed `crankshaft-ui-slim` resolution storm is fixed. ✓
 - Keep the existing `1920x1080` display configuration intact while the phone reconnects.
 
 ## Logging and diagnostics
@@ -62,11 +69,13 @@ OpenAuto appears to keep the display/video surface alive across Android Auto tra
   - no HDMI flicker from display re-negotiation
 
 ## Deployment checklist
-- [x] Implement recovery logic in `RealAndroidAutoService.cpp` (started)
+- [x] Implement recovery logic in `RealAndroidAutoService.cpp` (receive re-arm for transient USB errors)
+- [x] `setDisplayResolution()` no-op guard + GStreamer reinit on genuine resolution change
+- [x] Add `AasdkErrorClassification.h` and unit tests (30 test cases)
+- [x] Fix resolution storm in `crankshaft-ui-slim` (QML + C++ deduplication)
 - [ ] Add AASDK transport error handling improvements
-- [ ] Add diagnostic logging
-- [ ] Run unit tests
-- [ ] Test on Raspberry Pi 3 with real phone
+- [ ] Deploy packages to Pi and verify
+- [ ] Test on Raspberry Pi 3 with real phone — confirm flicker stops
 - [ ] Confirm flicker stops and recovery is smooth
 
 ## Follow-up
