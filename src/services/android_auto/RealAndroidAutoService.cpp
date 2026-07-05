@@ -267,6 +267,47 @@ static int getBoundedConfigValue(const QString& key, int defaultValue, int minVa
   return std::clamp(configuredValue, minValue, maxValue);
 }
 
+static auto resolveBoundedIntSetting(const QMap<QString, QVariant>& settings,
+                                     const QString& deviceSettingKey,
+                                     const QString& serviceConfigKey,
+                                     const QString& legacyServiceConfigKey, int defaultValue,
+                                     int minValue, int maxValue) -> int {
+  bool ok = false;
+  if (settings.contains(deviceSettingKey)) {
+    const int value = settings.value(deviceSettingKey).toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  const QVariant serviceValue = ConfigService::instance().get(serviceConfigKey, QVariant());
+  if (serviceValue.isValid()) {
+    const int value = serviceValue.toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  const QVariant legacyServiceValue =
+      ConfigService::instance().get(legacyServiceConfigKey, QVariant());
+  if (legacyServiceValue.isValid()) {
+    const int value = legacyServiceValue.toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  return defaultValue;
+}
+
+struct AAVideoAdvertisementConfig {
+  QSize resolution;
+  int fps;
+  int density;
+  int widthMargin;
+  int heightMargin;
+};
+
 enum class AAStartupProfile {
   Resilient,
   CompatOpenAuto,
@@ -365,6 +406,51 @@ static auto isProjectionIdleReconnectEnabled() -> bool {
       .get("core.android_auto.projection.idle_reconnect_enabled", true)
       .toBool();
 }
+
+  static auto resolveVideoAdvertisementConfig(const QMap<QString, QVariant>& settings)
+    -> AAVideoAdvertisementConfig {
+    const bool compatOpenAutoProfile = isCompatOpenAutoProfileEnabled();
+
+    const int defaultWidth = compatOpenAutoProfile ? 800 : 1024;
+    const int defaultHeight = compatOpenAutoProfile ? 480 : 600;
+    const int defaultFps = 30;
+    const int defaultDensity = compatOpenAutoProfile ? 140 : 160;
+
+    AAVideoAdvertisementConfig resolved;
+    resolved.resolution.setWidth(resolveBoundedIntSetting(
+      settings, "video.resolution.width", "core.services.android_auto.video.resolution.width",
+      "core.android_auto.video.resolution.width", defaultWidth, 640, 3840));
+    resolved.resolution.setHeight(resolveBoundedIntSetting(
+      settings, "video.resolution.height", "core.services.android_auto.video.resolution.height",
+      "core.android_auto.video.resolution.height", defaultHeight, 360, 2160));
+    resolved.fps = resolveBoundedIntSetting(settings, "video.fps",
+                        "core.services.android_auto.video.fps",
+                        "core.android_auto.video.fps", defaultFps, 30, 60);
+    resolved.density = resolveBoundedIntSetting(settings, "video.density",
+                          "core.services.android_auto.video.density",
+                          "core.android_auto.video.density", defaultDensity,
+                          80, 640);
+    resolved.widthMargin = resolveBoundedIntSetting(settings, "video.width_margin",
+                            "core.services.android_auto.video.width_margin",
+                            "core.android_auto.video.width_margin", 0, 0,
+                            1000);
+    resolved.heightMargin = resolveBoundedIntSetting(
+      settings, "video.height_margin", "core.services.android_auto.video.height_margin",
+      "core.android_auto.video.height_margin", 0, 0, 1000);
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Resolved AA video config: resolution=%1x%2 fps=%3 "
+          "density=%4 width_margin=%5 height_margin=%6 startup_profile=%7")
+        .arg(resolved.resolution.width())
+        .arg(resolved.resolution.height())
+        .arg(resolved.fps)
+        .arg(resolved.density)
+        .arg(resolved.widthMargin)
+        .arg(resolved.heightMargin)
+        .arg(aaStartupProfileToString(resolveAAStartupProfile())));
+
+    return resolved;
+  }
 
 static auto parseLoggerLevel(const QString& value, bool* valid = nullptr) -> Logger::Level {
   const QString normalised = value.trimmed().toLower();
@@ -680,18 +766,23 @@ static auto selectVideoFrameRate(int fps)
 static void appendVideoSinkFeature(
     aap_protobuf::service::control::message::ServiceDiscoveryResponse& response,
     const std::shared_ptr<aasdk::channel::mediasink::video::channel::VideoChannel>& videoChannel,
-    const QSize& resolution, int fps) {
+    const QSize& resolution, int fps, int density, int widthMargin, int heightMargin) {
   if (!videoChannel) {
     return;
   }
+
+  Q_UNUSED(resolution);
 
   // Use the negotiated stream resolution, not the UI display resolution.
   // The phone encodes at this resolution; GStreamer decodes at this resolution.
   // The QML Image scales the output to fit the physical display.
   const QSize streamResolution = negotiatedVideoResolution();
 
-  const int density = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.density_dpi"), 160, 120, 640);
+  const int configuredDensity =
+      density > 0
+          ? density
+          : getBoundedConfigValue(QStringLiteral("core.android_auto.video.density_dpi"), 160,
+                                  120, 640);
 
   auto* service = response.add_channels();
   service->set_id(static_cast<uint32_t>(videoChannel->getId()));
@@ -704,9 +795,9 @@ static void appendVideoSinkFeature(
   auto* videoConfig = mediaSink->add_video_configs();
   videoConfig->set_codec_resolution(selectVideoResolution(streamResolution));
   videoConfig->set_frame_rate(selectVideoFrameRate(fps));
-  videoConfig->set_width_margin(0);
-  videoConfig->set_height_margin(0);
-  videoConfig->set_density(density);
+  videoConfig->set_width_margin(static_cast<uint32_t>(std::max(0, widthMargin)));
+  videoConfig->set_height_margin(static_cast<uint32_t>(std::max(0, heightMargin)));
+  videoConfig->set_density(static_cast<uint32_t>(std::max(80, configuredDensity)));
 }
 
 static void appendAudioSinkFeature(
@@ -1371,7 +1462,8 @@ class AAControlEventHandler final
     headUnitInfo->set_head_unit_software_version("1.0");
 
     appendVideoSinkFeature(response, m_service->m_videoChannel, m_service->m_resolution,
-                           m_service->m_fps);
+                 m_service->m_fps, m_service->m_videoDensity,
+                 m_service->m_videoWidthMargin, m_service->m_videoHeightMargin);
     appendAudioSinkFeature(response, m_service->m_mediaAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_MEDIA, 48000,
                            2);
@@ -2675,6 +2767,13 @@ void RealAndroidAutoService::setWirelessNetworkManager(
 void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& settings) {
   applyAndroidAutoLoggingConfig(settings);
   setChannelConfig(resolveAndroidAutoChannelConfig(settings, m_channelConfig));
+
+  const AAVideoAdvertisementConfig videoConfig = resolveVideoAdvertisementConfig(settings);
+  m_resolution = videoConfig.resolution;
+  m_fps = videoConfig.fps;
+  m_videoDensity = videoConfig.density;
+  m_videoWidthMargin = videoConfig.widthMargin;
+  m_videoHeightMargin = videoConfig.heightMargin;
 
   Logger::instance().info(QString("[RealAndroidAutoService] Resolved startup profile: %1")
                               .arg(aaStartupProfileToString(resolveAAStartupProfile())));

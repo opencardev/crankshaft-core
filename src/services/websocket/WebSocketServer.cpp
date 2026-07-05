@@ -284,6 +284,14 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
               QString("[WebSocketServer] Received display resolution update from UI: %1x%2").arg(width).arg(height));
           aaService->setDisplayResolution(QSize(width, height));
         }
+      } else if (topic == QStringLiteral("android-auto/display/fps")) {
+        const int fps = payload.value(QStringLiteral("fps")).toInt();
+        if (fps > 0) {
+          Logger::instance().info(
+              QString("[WebSocketServer] Received display framerate update from UI: %1 fps")
+                  .arg(fps));
+          aaService->setFramerate(fps);
+        }
       } else if (topic == QStringLiteral("android-auto/touch")) {
         const QSize displayResolution = aaService->getDisplayResolution();
         const double rawX = payload.value(QStringLiteral("x")).toDouble();

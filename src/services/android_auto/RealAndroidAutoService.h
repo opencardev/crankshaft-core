@@ -308,6 +308,9 @@ class RealAndroidAutoService : public AndroidAutoService {
   AndroidDevice m_device;
   QSize m_resolution{1024, 600};
   int m_fps{30};
+  int m_videoDensity{160};
+  int m_videoWidthMargin{0};
+  int m_videoHeightMargin{0};
   bool m_audioEnabled{true};
   ChannelConfig m_channelConfig;
 
