@@ -35,6 +35,16 @@
         "sensor_enabled": true,
         "bluetooth_enabled": true
       },
+      "video": {
+        "resolution": {
+          "width": 800,
+          "height": 480
+        },
+        "fps": 30,
+        "density": 140,
+        "width_margin": 0,
+        "height_margin": 0
+      },
       "control": {
         "version_request_max_attempts": 10,
         "version_request_recovery_ms": 120000,
