@@ -171,6 +171,7 @@ set(CORE_SOURCES
 
   # Multimedia HAL
   hal/multimedia/IVideoDecoder.cpp
+  hal/multimedia/GStreamerWebRtcBridge.h
   hal/multimedia/GStreamerVideoDecoder.cpp
   hal/multimedia/GStreamerWebRtcBridge.cpp
   hal/multimedia/IAudioMixer.cpp
