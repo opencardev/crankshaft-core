@@ -81,6 +81,12 @@ class MockAndroidAutoService : public AndroidAutoService {
   int getFrameDropCount() const override {
     return m_droppedFrames;
   }
+
+  VideoTransportMode getVideoTransportMode() const override {
+    return VideoTransportMode::WEBSOCKET_JPEG;
+  }
+
+  void handleWebRtcSignalingMessage(const QString& topic, const QVariantMap& payload) override;
   int getLatency() const override {
     return m_latency;
   }

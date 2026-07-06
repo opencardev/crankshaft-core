@@ -37,6 +37,7 @@
 
 #include "../../hal/multimedia/AudioMixer.h"
 #include "../../hal/multimedia/GStreamerVideoDecoder.h"
+#include "../../hal/multimedia/GStreamerWebRtcBridge.h"
 #include "../audio/AudioRouter.h"
 #include "../config/ConfigService.h"
 #include "../eventbus/EventBus.h"
@@ -2775,6 +2776,15 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
   m_videoWidthMargin = videoConfig.widthMargin;
   m_videoHeightMargin = videoConfig.heightMargin;
 
+  const QString requestedVideoTransportMode =
+      settings.value(QStringLiteral("video.transport_mode"),
+                     settings.value(QStringLiteral("android_auto.video_transport_mode"),
+                                    QStringLiteral("websocket-jpeg")))
+          .toString();
+  m_videoTransportMode = AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+  Logger::instance().info(QString("[RealAndroidAutoService] Configured video transport mode: %1")
+                              .arg(AndroidAutoService::videoTransportModeToString(m_videoTransportMode)));
+
   Logger::instance().info(QString("[RealAndroidAutoService] Resolved startup profile: %1")
                               .arg(aaStartupProfileToString(resolveAAStartupProfile())));
 
@@ -2857,6 +2867,7 @@ void RealAndroidAutoService::deinitialise() {
     disconnect();
   }
 
+  teardownWebRtcBridge();
   cleanupAASDK();
   m_isInitialised = false;
   transitionToState(ConnectionState::DISCONNECTED);
@@ -3217,6 +3228,10 @@ void RealAndroidAutoService::setupChannels() {
                   Logger::instance().error("Video decoder error: " + error);
                 });
 
+        if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+          setupWebRtcBridge();
+        }
+
         Logger::instance().info(
             QString("Video decoder initialized: %1").arg(m_videoDecoder->getDecoderName()));
       } else {
@@ -3458,6 +3473,10 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
                   Logger::instance().error("Video decoder error: " + error);
                 });
 
+        if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+          setupWebRtcBridge();
+        }
+
         Logger::instance().info(
             QString("Video decoder initialized: %1").arg(m_videoDecoder->getDecoderName()));
       } else {
@@ -3580,6 +3599,8 @@ void RealAndroidAutoService::cleanupAASDK() {
 
   // Clean up channels after IO and messenger are quiesced.
   cleanupChannels();
+
+  teardownWebRtcBridge();
 
   // Stop USB hub
   if (m_usbHub) {
@@ -5935,6 +5956,11 @@ void RealAndroidAutoService::onVideoFrame(const uint8_t* data, int size, int wid
 
   const QByteArray frameData(reinterpret_cast<const char*>(data), size);
   emit videoFrameReady(width, height, frameData);
+  if (m_webRtcBridge && m_webRtcBridge->isInitialized()) {
+    if (!m_webRtcBridge->pushVideoFrame(frameData)) {
+      aaLogDebug("videoWebRTC", "failed to push video frame into WebRTC bridge");
+    }
+  }
   updateStats();
 }
 
@@ -5944,6 +5970,61 @@ void RealAndroidAutoService::onAudioData(const QByteArray& data) {
   }
 
   emit audioDataReady(data);
+}
+
+void RealAndroidAutoService::handleWebRtcSignalingMessage(const QString& topic,
+                                                          const QVariantMap& payload) {
+  if (!m_webRtcBridge) {
+    Logger::instance().warning(
+        QString("[RealAndroidAutoService] Ignoring WebRTC signaling topic without bridge: %1")
+            .arg(topic));
+    return;
+  }
+
+  if (!m_webRtcBridge->handleWebRtcSignalingMessage(topic, payload)) {
+    Logger::instance().warning(
+        QString("[RealAndroidAutoService] WebRTC signaling handler rejected topic: %1").arg(topic));
+  }
+}
+
+void RealAndroidAutoService::setupWebRtcBridge() {
+  if (m_webRtcBridge && m_webRtcBridge->isInitialized()) {
+    return;
+  }
+
+  if (!m_webRtcBridge) {
+    m_webRtcBridge = std::make_unique<GStreamerWebRtcBridge>(this);
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::signalingMessageReady, this,
+            [this](const QString& topic, const QVariantMap& payload) {
+              emit webRtcSignalingMessage(topic, payload);
+            });
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::statusChanged, this,
+            [this](const QJsonObject& status) {
+              QJsonObject augmentedStatus = status;
+              augmentedStatus[QStringLiteral("video_transport_mode")] =
+                  AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+              emit projectionStatusChanged(augmentedStatus);
+            });
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::errorOccurred, this,
+            [this](const QString& error) {
+              Logger::instance().warning(QString("[RealAndroidAutoService] WebRTC bridge error: %1").arg(error));
+              emit errorOccurred(error);
+            });
+  }
+
+  if (!m_webRtcBridge->initialize(m_resolution, m_fps)) {
+    Logger::instance().warning(
+        "[RealAndroidAutoService] WebRTC bridge initialization failed; falling back to websocket frames");
+    m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+  }
+}
+
+void RealAndroidAutoService::teardownWebRtcBridge() {
+  if (!m_webRtcBridge) {
+    return;
+  }
+
+  m_webRtcBridge->deinitialize();
 }
 
 void RealAndroidAutoService::startControlPingLoop() {

@@ -74,6 +74,17 @@ static auto normaliseVendorFilterList(const QVariant& rawValue) -> QStringList {
   return values;
 }
 
+static auto videoTransportModeToString(AndroidAutoService::VideoTransportMode mode) -> QString {
+  switch (mode) {
+    case AndroidAutoService::VideoTransportMode::WEBSOCKET_JPEG:
+      return QStringLiteral("websocket-jpeg");
+    case AndroidAutoService::VideoTransportMode::WEBRTC:
+      return QStringLiteral("webrtc");
+  }
+
+  return QStringLiteral("unknown");
+}
+
 WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
     : QObject(parent),
       m_server(new QWebSocketServer("CrankshaftCore", QWebSocketServer::NonSecureMode, this)),
@@ -239,6 +250,14 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
   if (topic.startsWith(QStringLiteral("android-auto/")) && m_serviceManager) {
     AndroidAutoService* aaService = m_serviceManager->getAndroidAutoService();
     if (aaService) {
+      if (topic.startsWith(QStringLiteral("android-auto/webrtc/"))) {
+        Logger::instance().info(
+            QString("[WebSocketServer] Forwarding Android Auto WebRTC signaling topic to service: %1")
+                .arg(topic));
+        aaService->handleWebRtcSignalingMessage(topic, payload);
+        return;
+      }
+
       if (topic == QStringLiteral("android-auto/launch")) {
         const QString serialNumber = payload.value(QStringLiteral("serial_number")).toString();
         if (serialNumber.isEmpty()) {
@@ -896,6 +915,10 @@ void WebSocketServer::setupAndroidAutoConnections() {
           &WebSocketServer::onAndroidAutoAudioDataReady);
   connect(aaService, &AndroidAutoService::projectionStatusChanged, this,
           &WebSocketServer::onAndroidAutoProjectionStatus);
+    connect(aaService, &AndroidAutoService::webRtcSignalingMessage, this,
+      [this](const QString& topic, const QVariantMap& payload) {
+        broadcastEvent(topic, payload);
+      });
 
   Logger::instance().info("[WebSocketServer] Android Auto service connections setup");
 }
@@ -1021,17 +1044,29 @@ void WebSocketServer::onAndroidAutoAudioDataReady(const QByteArray& data) {
 }
 
 void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
+  QJsonObject statusWithTransport = status;
+  if (m_serviceManager) {
+  AndroidAutoService* aaService = m_serviceManager->getAndroidAutoService();
+  if (aaService) {
+    statusWithTransport.insert(QStringLiteral("video_transport_mode"),
+                 videoTransportModeToString(aaService->getVideoTransportMode()));
+  }
+  }
+
   const bool previousAvailable = m_hasProjectionStatus;
-  const bool projectionReady = status.value(QStringLiteral("projection_ready")).toBool(false);
+  const bool projectionReady = statusWithTransport.value(QStringLiteral("projection_ready")).toBool(false);
   const bool controlVersionReceived =
-      status.value(QStringLiteral("control_version_received")).toBool(false);
-  const bool videoReady = status.value(QStringLiteral("video_ready")).toBool(false);
-  const bool mediaAudioReady = status.value(QStringLiteral("media_audio_ready")).toBool(false);
+    statusWithTransport.value(QStringLiteral("control_version_received")).toBool(false);
+  const bool videoReady = statusWithTransport.value(QStringLiteral("video_ready")).toBool(false);
+  const bool mediaAudioReady =
+    statusWithTransport.value(QStringLiteral("media_audio_ready")).toBool(false);
   const bool serviceDiscoveryCompleted =
-      status.value(QStringLiteral("service_discovery_completed")).toBool(false);
+    statusWithTransport.value(QStringLiteral("service_discovery_completed")).toBool(false);
   const QString connectionStateName =
-      status.value(QStringLiteral("connection_state_name")).toString();
-  const QString reason = status.value(QStringLiteral("reason")).toString();
+    statusWithTransport.value(QStringLiteral("connection_state_name")).toString();
+  const QString reason = statusWithTransport.value(QStringLiteral("reason")).toString();
+  const QString videoTransportMode =
+    statusWithTransport.value(QStringLiteral("video_transport_mode")).toString();
 
   bool changed = !previousAvailable;
   if (previousAvailable) {
@@ -1043,6 +1078,7 @@ void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
               boolChanged(QStringLiteral("video_ready")) ||
               boolChanged(QStringLiteral("media_audio_ready")) ||
               boolChanged(QStringLiteral("service_discovery_completed")) ||
+              boolChanged(QStringLiteral("video_transport_mode")) ||
               boolChanged(QStringLiteral("connection_state_name")) ||
               boolChanged(QStringLiteral("reason"));
   }
@@ -1051,20 +1087,21 @@ void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
     Logger::instance().info(
         QString("[WebSocketServer] channel-status values: state=%1 projection_ready=%2 "
                 "control_version_received=%3 video_ready=%4 media_audio_ready=%5 "
-                "service_discovery_completed=%6 reason=%7")
+                "video_transport_mode=%6 service_discovery_completed=%7 reason=%8")
             .arg(connectionStateName)
             .arg(projectionReady ? "true" : "false")
             .arg(controlVersionReceived ? "true" : "false")
             .arg(videoReady ? "true" : "false")
             .arg(mediaAudioReady ? "true" : "false")
+            .arg(videoTransportMode)
             .arg(serviceDiscoveryCompleted ? "true" : "false")
             .arg(reason));
   }
 
-  m_lastProjectionStatus = status;
+  m_lastProjectionStatus = statusWithTransport;
   m_hasProjectionStatus = true;
 
-  broadcastEvent("android-auto/status/channel-status", status.toVariantMap());
+  broadcastEvent("android-auto/status/channel-status", statusWithTransport.toVariantMap());
 }
 
 bool WebSocketServer::validateMessage(const QJsonObject& obj, QString& error) const {
