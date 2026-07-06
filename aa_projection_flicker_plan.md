@@ -53,6 +53,23 @@ Rules:
 - Prefer one discriminating test before broad refactors.
 - Capture what was tried and what the result was.
 
+## Recommended Direction
+
+Keep WebSockets for Android Auto control, status, and small metadata messages, but stop using them as the per-frame pixel transport.
+
+Why this is better:
+
+- Per-frame base64 JPEG payloads create avoidable encode, copy, and decode churn.
+- Every frame becomes a unique `Image.source`, which forces repeated reload work in QML.
+- The current pacing fix can reduce pressure, but it does not remove the transport overhead.
+
+Target shape:
+
+- Core owns decode and writes the latest frame into a local shared frame buffer or mmap-backed store.
+- Core publishes only lightweight metadata over websocket: frame id, dimensions, timestamp, readiness, and buffer location.
+- ui-slim reads the latest available frame from the shared transport and updates the projection surface without rebuilding a data URL on every frame.
+- WebSocket frame messages become a fallback/debug path, not the primary video path.
+
 ## Investigation Checklist
 
 - [x] Confirm whether flicker is present in VNC, HDMI, or both.
@@ -83,8 +100,10 @@ Rules:
 - [ ] Add startup telemetry for advertised config, decoder config, and render target.
 - [ ] Add temporary ui-slim telemetry for frame cadence, frame size, and repeated-payload detection.
 - [ ] Stop treating every video frame as a fresh video-state transition in ui-slim unless the state actually changes.
-- [ ] If payloads repeat, coalesce identical frames before updating `projectionFrameUrl`.
-- [ ] If payloads differ every frame, replace the data-URL `Image` path with a lower-churn render path.
+- [ ] Replace per-frame websocket JPEG delivery with a local shared frame transport.
+- [ ] Keep websocket messages for frame metadata, readiness, and errors only.
+- [ ] Update ui-slim to consume shared frames directly instead of rebuilding `projectionFrameUrl` every frame.
+- [ ] Leave the paced websocket path available only as a compatibility/debug fallback during migration.
 - [ ] Make sure defaults match the most stable known profile.
 
 ## Test Matrix
@@ -128,11 +147,17 @@ If that does not appear:
 
 ## Next Steps
 
-1. Instrument ui-slim at the `CoreClient` or `AndroidAutoFacade` frame handoff to log frame count, size, and a cheap payload fingerprint every N frames.
-2. Confirm whether `videoStateChanged(true)` is being emitted on every frame and reduce that to edge transitions only.
-3. If many consecutive frames are identical, coalesce them before updating `projectionFrameUrl`.
-4. If frames genuinely differ every time, plan a transport/render-path change away from JPEG base64 data URLs in QML `Image`.
-5. Re-test VNC on the Pi after the instrumentation lands, then re-check HDMI on the same build.
+1. Define the shared frame transport contract: ownership, lifecycle, metadata fields, and cleanup rules.
+2. Prototype a producer/consumer path in core that writes the latest decoded frame to a local shared buffer and exposes frame metadata over websocket.
+3. Update ui-slim to read the shared buffer and render the latest frame without creating a new base64 data URL for each update.
+4. Keep the current websocket JPEG path behind a feature flag or fallback so the migration can be tested safely.
+5. Measure redraw cadence and CPU usage on the Pi after the cutover, then remove the fallback once the new path is stable.
+
+## Migration Notes
+
+- The pacing branch is a useful stopgap, but it should not be the end state.
+- If shared-memory/frame-buffer plumbing is too large for one step, land it in two phases: metadata contract first, transport swap second.
+- Do not spend more time trying to tune the websocket JPEG path once the shared transport prototype is available.
 
 ## Notes
 
