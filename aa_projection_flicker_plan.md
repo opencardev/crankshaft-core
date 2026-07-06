@@ -143,3 +143,9 @@ If that does not appear:
 
     Core: decoder init once, first frame at `12:24:02`, one later UI resolution update at `12:26:35`.
     ui-slim: repeated `android-auto/media/video-frame` and `Video state changed: active` entries across `12:28:19` to `12:28:27`.
+
+- Latest update after redeploy (2026-07-06, later test window):
+
+    ui-slim state-edge change was deployed but visual redraw did not improve.
+    ui-slim logs still show sustained high-cadence `android-auto/media/video-frame` events.
+    Next mitigation branch is `feature/aa-frame-pacing` in ui-slim (`8a33067`), which coalesces burst frames to the latest frame at a paced dispatch interval.
