@@ -254,7 +254,7 @@ target_link_libraries(crankshaft-core-lib PRIVATE
 )
 
 if(GSTREAMER_WEBRTC_FOUND AND GSTREAMER_SDP_FOUND)
-  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=1)
+  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=1 GST_USE_UNSTABLE_API)
 else()
   target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=0)
 endif()

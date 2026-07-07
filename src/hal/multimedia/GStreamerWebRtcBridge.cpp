@@ -152,42 +152,48 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
     QVariantMap payload;
     payload[QStringLiteral("event")] = QStringLiteral("negotiation-needed");
     emit self->statusChanged(QJsonObject{{QStringLiteral("state"), QStringLiteral("negotiation-needed")}});
-    gst_webrtc_bin_create_offer(GST_WEBRTC_BIN(self->m_private->webrtcBin), nullptr,
-                                gst_promise_new_with_change_func(
-                                    +[](GstPromise* promise, gpointer promiseUserData) {
-                                      auto* bridge = static_cast<GStreamerWebRtcBridge*>(promiseUserData);
-                                      const GstStructure* reply = gst_promise_get_reply(promise);
-                                      if (!reply) {
-                                        emit bridge->errorOccurred(
-                                            QStringLiteral("WebRTC offer promise had no reply"));
-                                        gst_promise_unref(promise);
-                                        return;
-                                      }
-                                      GstWebRTCSessionDescription* offer = nullptr;
-                                      gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION,
-                                                        &offer, nullptr);
-                                      if (!offer || !offer->sdp) {
-                                        emit bridge->errorOccurred(
-                                            QStringLiteral("WebRTC offer creation failed"));
-                                        if (offer) {
-                                          gst_webrtc_session_description_free(offer);
-                                        }
-                                        gst_promise_unref(promise);
-                                        return;
-                                      }
-                                      gchar* sdpText = gst_sdp_message_as_text(offer->sdp);
-                                      QVariantMap offerPayload;
-                                      offerPayload[QStringLiteral("type")] = QStringLiteral("offer");
-                                      offerPayload[QStringLiteral("sdp")] = QString::fromUtf8(sdpText);
-                                      offerPayload[QStringLiteral("media")] = QStringLiteral("video");
-                                      offerPayload[QStringLiteral("codec")] = QStringLiteral("H264");
-                                      emit bridge->signalingMessageReady(QStringLiteral("android-auto/webrtc/offer"),
-                                                                         offerPayload);
-                                      g_free(sdpText);
-                                      gst_webrtc_session_description_free(offer);
-                                      gst_promise_unref(promise);
-                                    },
-                                    self, nullptr));
+    GstPromise* offerPromise = gst_promise_new_with_change_func(
+        +[](GstPromise* promise, gpointer promiseUserData) {
+          auto* bridge = static_cast<GStreamerWebRtcBridge*>(promiseUserData);
+          const GstStructure* reply = gst_promise_get_reply(promise);
+          if (!reply) {
+            emit bridge->errorOccurred(QStringLiteral("WebRTC offer promise had no reply"));
+            gst_promise_unref(promise);
+            return;
+          }
+          GstWebRTCSessionDescription* offer = nullptr;
+          gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer,
+                            nullptr);
+          if (!offer || !offer->sdp) {
+            emit bridge->errorOccurred(QStringLiteral("WebRTC offer creation failed"));
+            if (offer) {
+              gst_webrtc_session_description_free(offer);
+            }
+            gst_promise_unref(promise);
+            return;
+          }
+
+          GstPromise* setLocalPromise = gst_promise_new();
+          g_signal_emit_by_name(bridge->m_private->webrtcBin, "set-local-description", offer,
+                                setLocalPromise);
+          gst_promise_interrupt(setLocalPromise);
+          gst_promise_unref(setLocalPromise);
+
+          gchar* sdpText = gst_sdp_message_as_text(offer->sdp);
+          QVariantMap offerPayload;
+          offerPayload[QStringLiteral("type")] = QStringLiteral("offer");
+          offerPayload[QStringLiteral("sdp")] = QString::fromUtf8(sdpText);
+          offerPayload[QStringLiteral("media")] = QStringLiteral("video");
+          offerPayload[QStringLiteral("codec")] = QStringLiteral("H264");
+          emit bridge->signalingMessageReady(QStringLiteral("android-auto/webrtc/offer"),
+                                             offerPayload);
+          g_free(sdpText);
+          gst_webrtc_session_description_free(offer);
+          gst_promise_unref(promise);
+        },
+        self, nullptr);
+
+    g_signal_emit_by_name(self->m_private->webrtcBin, "create-offer", nullptr, offerPromise);
   }), this);
 
   g_signal_connect(m_private->webrtcBin, "on-ice-candidate", G_CALLBACK(+[](GstElement*, guint mlineIndex,
@@ -296,9 +302,12 @@ bool GStreamerWebRtcBridge::handleWebRtcSignalingMessage(const QString& topic,
     }
 
     GstWebRTCSessionDescription* answer =
-        gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdpMessage);
-    gst_webrtc_bin_set_remote_description(GST_WEBRTC_BIN(m_private->webrtcBin), answer,
-                                          nullptr, nullptr);
+      gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdpMessage);
+    GstPromise* setRemotePromise = gst_promise_new();
+    g_signal_emit_by_name(m_private->webrtcBin, "set-remote-description", answer,
+                setRemotePromise);
+    gst_promise_interrupt(setRemotePromise);
+    gst_promise_unref(setRemotePromise);
     gst_webrtc_session_description_free(answer);
     emit statusChanged(QJsonObject{{QStringLiteral("state"), QStringLiteral("remote-answer-set")}});
     return true;
