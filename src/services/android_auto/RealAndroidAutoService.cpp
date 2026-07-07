@@ -2779,7 +2779,7 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
   const QString requestedVideoTransportMode =
       settings.value(QStringLiteral("video.transport_mode"),
                      settings.value(QStringLiteral("android_auto.video_transport_mode"),
-                                    QStringLiteral("websocket-jpeg")))
+                    QStringLiteral("webrtc")))
           .toString();
   m_videoTransportMode = AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
   Logger::instance().info(QString("[RealAndroidAutoService] Configured video transport mode: %1")

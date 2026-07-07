@@ -91,6 +91,7 @@ void ProfileManager::initializeDefaultProfiles() {
   androidAutoDevice.settings["fps"] = 30;
   androidAutoDevice.settings["generateTestVideo"] = true;
   androidAutoDevice.settings["generateTestAudio"] = false;
+  androidAutoDevice.settings["video.transport_mode"] = "webrtc";
   // Channel configuration
   androidAutoDevice.settings["channels.video"] = true;
   androidAutoDevice.settings["channels.mediaAudio"] = true;
