@@ -19,6 +19,9 @@ qt6-l10n-tools
 libqt6sql6-sqlite
 libgstreamer1.0-dev
 libgstreamer-plugins-base1.0-dev
+libgstreamer-plugins-bad1.0-dev
+libnice-dev
+libsrtp2-dev
 libdbus-1-dev
 libbluetooth-dev
 libusb-1.0-0-dev
