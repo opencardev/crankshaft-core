@@ -105,3 +105,4 @@ Initial comprehensive set:
 - [Audio Routing](comprehensive/AUDIO_ROUTING.md)
 - [Android Auto](comprehensive/ANDROID_AUTO.md)
 - [Bluetooth](comprehensive/BLUETOOTH.md)
+- [Profiles](comprehensive/PROFILES.md)

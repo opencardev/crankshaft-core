@@ -7,6 +7,7 @@
     "android_auto": {
       "startup_profile": "compat_openauto_profile",
       "compat_openauto_profile": true,
+      "video_transport_mode": "webrtc",
       "logging": {
         "enabled": true,
         "level": "debug",
