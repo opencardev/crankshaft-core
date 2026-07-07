@@ -4,6 +4,7 @@ add_executable(crankshaft-core-tests
     test_main.cpp
     test_audio_router.cpp
     test_aasdk_error_classification.cpp
+    test_android_auto_transport_mode.cpp
 )
 
 target_include_directories(crankshaft-core-tests PRIVATE

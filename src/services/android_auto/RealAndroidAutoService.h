@@ -44,6 +44,7 @@ class AAMicrophoneEventHandler;
 class AABluetoothEventHandler;
 class AAWifiProjectionEventHandler;
 class IWirelessNetworkManager;
+class GStreamerWebRtcBridge;
 
 // Forward declarations for AASDK
 #ifdef CRANKSHAFT_AASDK_OLD_API
@@ -187,6 +188,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   int getFrameDropCount() const override {
     return m_droppedFrames;
   }
+
+  VideoTransportMode getVideoTransportMode() const override {
+    return m_videoTransportMode;
+  }
+  void handleWebRtcSignalingMessage(const QString& topic, const QVariantMap& payload) override;
   int getLatency() const override {
     return m_latency;
   }
@@ -259,6 +265,8 @@ class RealAndroidAutoService : public AndroidAutoService {
   void onChannelError(const QString& channelName, const QString& error);
   void resetProjectionStatus(const QString& reason);
   void publishProjectionStatus(const QString& reason);
+  void setupWebRtcBridge();
+  void teardownWebRtcBridge();
   void ensureProjectionIdleWatchdogTimer();
   void updateProjectionIdleWatchdog(const QString& reason);
   void stopProjectionIdleWatchdog(const QString& reason);
@@ -313,6 +321,7 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_videoHeightMargin{0};
   bool m_audioEnabled{true};
   ChannelConfig m_channelConfig;
+  VideoTransportMode m_videoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
 
   // Session state tracking
   SessionState m_sessionState{SessionState::ENDED};
@@ -371,6 +380,7 @@ class RealAndroidAutoService : public AndroidAutoService {
   bool m_audioPayloadSeen{false};
   bool m_lastProjectionReady{false};
   bool m_aasdkTeardownInProgress{false};
+  std::unique_ptr<GStreamerWebRtcBridge> m_webRtcBridge;
   QTimer* m_projectionIdleWatchdogTimer{nullptr};
   qint64 m_projectionIdleWatchdogStartedMs{0};
   int m_projectionIdleWatchdogTickCount{0};

@@ -108,6 +108,8 @@ pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
 pkg_check_modules(GSTREAMER_APP REQUIRED gstreamer-app-1.0)
 pkg_check_modules(GSTREAMER_VIDEO REQUIRED gstreamer-video-1.0)
 pkg_check_modules(GSTREAMER_AUDIO REQUIRED gstreamer-audio-1.0)
+pkg_check_modules(GSTREAMER_WEBRTC QUIET gstreamer-webrtc-1.0)
+pkg_check_modules(GSTREAMER_SDP QUIET gstreamer-sdp-1.0)
 
 # Find DBus for wireless/bluetooth
 pkg_check_modules(DBUS REQUIRED dbus-1)
@@ -169,7 +171,9 @@ set(CORE_SOURCES
 
   # Multimedia HAL
   hal/multimedia/IVideoDecoder.cpp
+  hal/multimedia/GStreamerWebRtcBridge.h
   hal/multimedia/GStreamerVideoDecoder.cpp
+  hal/multimedia/GStreamerWebRtcBridge.cpp
   hal/multimedia/IAudioMixer.cpp
   hal/multimedia/AudioMixer.cpp
   hal/multimedia/AudioHAL.cpp
@@ -194,6 +198,8 @@ target_include_directories(crankshaft-core-lib PRIVATE
   ${GSTREAMER_APP_INCLUDE_DIRS}
   ${GSTREAMER_VIDEO_INCLUDE_DIRS}
   ${GSTREAMER_AUDIO_INCLUDE_DIRS}
+  ${GSTREAMER_WEBRTC_INCLUDE_DIRS}
+  ${GSTREAMER_SDP_INCLUDE_DIRS}
   ${DBUS_INCLUDE_DIRS}
   ${LIBUSB_INCLUDE_DIRS}
 )
@@ -271,6 +277,8 @@ target_link_libraries(crankshaft-core-lib PRIVATE
   ${GSTREAMER_APP_LIBRARIES}
   ${GSTREAMER_VIDEO_LIBRARIES}
   ${GSTREAMER_AUDIO_LIBRARIES}
+  ${GSTREAMER_WEBRTC_LIBRARIES}
+  ${GSTREAMER_SDP_LIBRARIES}
   ${DBUS_LIBRARIES}
   ${LIBUSB_LIBRARIES}
   OpenSSL::SSL
@@ -279,6 +287,12 @@ target_link_libraries(crankshaft-core-lib PRIVATE
   CRANKSHAFT_AASDK
   nlohmann_json::nlohmann_json
 )
+
+if(GSTREAMER_WEBRTC_FOUND AND GSTREAMER_SDP_FOUND)
+  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=1)
+else()
+  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=0)
+endif()
 target_link_libraries(crankshaft-core PRIVATE crankshaft-core-lib)
   # Note: json-schema-validator is header-only and its include directories
   # are made available via FetchContent; no link target is required here.

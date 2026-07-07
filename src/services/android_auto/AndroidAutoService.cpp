@@ -225,6 +225,15 @@ class AndroidAutoServiceImpl : public AndroidAutoService {
     return frame_drop_count_;
   }
 
+  VideoTransportMode getVideoTransportMode() const override {
+    return VideoTransportMode::WEBSOCKET_JPEG;
+  }
+
+  void handleWebRtcSignalingMessage(const QString& topic, const QVariantMap& payload) override {
+    Q_UNUSED(topic)
+    Q_UNUSED(payload)
+  }
+
   int getLatency() const override {
     return latency_ms_;
   }
@@ -296,6 +305,26 @@ AndroidAutoService::AndroidAutoService(QObject* parent) : QObject(parent) {}
 
 // Base class destructor
 AndroidAutoService::~AndroidAutoService() = default;
+
+auto AndroidAutoService::videoTransportModeFromString(const QString& mode) -> VideoTransportMode {
+  const QString normalized = mode.trimmed().toLower();
+  if (normalized == QStringLiteral("webrtc")) {
+    return VideoTransportMode::WEBRTC;
+  }
+
+  return VideoTransportMode::WEBSOCKET_JPEG;
+}
+
+auto AndroidAutoService::videoTransportModeToString(VideoTransportMode mode) -> QString {
+  switch (mode) {
+    case VideoTransportMode::WEBRTC:
+      return QStringLiteral("webrtc");
+    case VideoTransportMode::WEBSOCKET_JPEG:
+      return QStringLiteral("websocket-jpeg");
+  }
+
+  return QStringLiteral("websocket-jpeg");
+}
 
 void AndroidAutoService::setWirelessNetworkManager(
     const std::shared_ptr<IWirelessNetworkManager>& manager) {
