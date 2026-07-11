@@ -6007,7 +6007,19 @@ void RealAndroidAutoService::setupWebRtcBridge() {
             });
     connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::errorOccurred, this,
             [this](const QString& error) {
-              Logger::instance().warning(QString("[RealAndroidAutoService] WebRTC bridge error: %1").arg(error));
+              Logger::instance().warning(
+                  QString("[RealAndroidAutoService] WebRTC bridge error: %1").arg(error));
+
+              // Bridge runtime errors can leave the UI waiting for WebRTC frames.
+              // Fall back immediately to websocket-jpeg so projection can continue.
+              if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+                Logger::instance().warning(
+                    "[RealAndroidAutoService] Falling back to websocket-jpeg after WebRTC bridge runtime error");
+                m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+                teardownWebRtcBridge();
+                publishProjectionStatus(QStringLiteral("webrtc_bridge_error_fallback"));
+              }
+
               emit errorOccurred(error);
             });
   }
