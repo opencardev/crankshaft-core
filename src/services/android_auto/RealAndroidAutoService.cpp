@@ -2776,11 +2776,29 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
   m_videoWidthMargin = videoConfig.widthMargin;
   m_videoHeightMargin = videoConfig.heightMargin;
 
-  const QString requestedVideoTransportMode =
-      settings.value(QStringLiteral("video.transport_mode"),
-                     settings.value(QStringLiteral("android_auto.video_transport_mode"),
-                    QStringLiteral("webrtc")))
-          .toString();
+    const QString configuredVideoTransportMode =
+      ConfigService::instance()
+        .get(QStringLiteral("video_transport_mode"),
+           ConfigService::instance().get(QStringLiteral("android_auto.video_transport_mode"),
+                         QVariant()))
+        .toString()
+        .trimmed();
+
+    const QString settingsVideoTransportMode =
+      settings
+        .value(QStringLiteral("video_transport_mode"),
+           settings.value(QStringLiteral("video.transport_mode"),
+                  settings.value(QStringLiteral("android_auto.video_transport_mode"),
+                           QVariant())))
+        .toString()
+        .trimmed();
+
+    const QString requestedVideoTransportMode =
+      !configuredVideoTransportMode.isEmpty()
+        ? configuredVideoTransportMode
+        : (!settingsVideoTransportMode.isEmpty() ? settingsVideoTransportMode
+                             : QStringLiteral("webrtc"));
+
     m_requestedVideoTransportMode =
       AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
     m_videoTransportMode = m_requestedVideoTransportMode;
