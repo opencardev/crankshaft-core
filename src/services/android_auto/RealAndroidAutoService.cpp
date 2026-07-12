@@ -2781,7 +2781,10 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
                      settings.value(QStringLiteral("android_auto.video_transport_mode"),
                     QStringLiteral("webrtc")))
           .toString();
-  m_videoTransportMode = AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+    m_requestedVideoTransportMode =
+      AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+    m_videoTransportMode = m_requestedVideoTransportMode;
+    m_videoTransportFallbackReason.clear();
   Logger::instance().info(QString("[RealAndroidAutoService] Configured video transport mode: %1")
                               .arg(AndroidAutoService::videoTransportModeToString(m_videoTransportMode)));
 
@@ -6016,6 +6019,7 @@ void RealAndroidAutoService::setupWebRtcBridge() {
                 Logger::instance().warning(
                     "[RealAndroidAutoService] Falling back to websocket-jpeg after WebRTC bridge runtime error");
                 m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+                m_videoTransportFallbackReason = QStringLiteral("webrtc_runtime_bridge_error");
                 teardownWebRtcBridge();
                 publishProjectionStatus(QStringLiteral("webrtc_bridge_error_fallback"));
               }
@@ -6028,6 +6032,8 @@ void RealAndroidAutoService::setupWebRtcBridge() {
     Logger::instance().warning(
         "[RealAndroidAutoService] WebRTC bridge initialization failed; falling back to websocket frames");
     m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+    m_videoTransportFallbackReason = QStringLiteral("webrtc_bridge_init_failed");
+    publishProjectionStatus(QStringLiteral("webrtc_bridge_init_fallback"));
   }
 }
 
@@ -6567,6 +6573,13 @@ void RealAndroidAutoService::publishProjectionStatus(const QString& reason) {
   status[QStringLiteral("media_audio_started")] = m_mediaAudioStarted;
   status[QStringLiteral("media_audio_frame_received")] = m_mediaAudioFrameReceived;
   status[QStringLiteral("media_audio_ready")] = audioReady;
+    status[QStringLiteral("video_transport_mode")] =
+      AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+    status[QStringLiteral("video_transport_requested")] =
+      AndroidAutoService::videoTransportModeToString(m_requestedVideoTransportMode);
+    status[QStringLiteral("video_transport_active")] =
+      AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+    status[QStringLiteral("video_transport_fallback_reason")] = m_videoTransportFallbackReason;
   status[QStringLiteral("system_audio_enabled")] = m_channelConfig.systemAudioEnabled;
   status[QStringLiteral("guidance_audio_enabled")] = m_channelConfig.speechAudioEnabled;
   status[QStringLiteral("telephony_audio_enabled")] = m_channelConfig.telephonyAudioEnabled;
@@ -6612,6 +6625,7 @@ void RealAndroidAutoService::resetProjectionStatus(const QString& reason) {
   m_controlHandshakeStartedMs = 0;
   ++m_controlHandshakeEpoch;
   m_controlHandshakeActivationRetryCount = 0;
+  m_videoTransportFallbackReason.clear();
   m_lastProjectionReady = false;
   m_channelReceiveArmTraceKeys.clear();
   publishProjectionStatus(reason);

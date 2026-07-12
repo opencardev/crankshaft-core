@@ -321,7 +321,9 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_videoHeightMargin{0};
   bool m_audioEnabled{true};
   ChannelConfig m_channelConfig;
+  VideoTransportMode m_requestedVideoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
   VideoTransportMode m_videoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
+  QString m_videoTransportFallbackReason;
 
   // Session state tracking
   SessionState m_sessionState{SessionState::ENDED};
