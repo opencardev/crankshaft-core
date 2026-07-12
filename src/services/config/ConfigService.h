@@ -32,6 +32,7 @@ class ConfigService : public QObject {
   auto load(const QString& filePath) -> bool;
   auto save(const QString& filePath) -> bool;
   [[nodiscard]] auto loadedFilePath() const -> QString;
+  [[nodiscard]] auto lastLoadError() const -> QString;
 
   [[nodiscard]] QVariant get(const QString& key, const QVariant& defaultValue = QVariant()) const;
   void set(const QString& key, const QVariant& value);
@@ -47,4 +48,5 @@ class ConfigService : public QObject {
 
   QVariantMap m_config;
   QString m_loadedFilePath;
+  QString m_lastLoadError;
 };

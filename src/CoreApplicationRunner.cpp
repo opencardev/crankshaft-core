@@ -177,6 +177,7 @@ int runCoreApplication(int argc, char* argv[], const CoreBuildInfo& buildInfo) {
   bool configLoaded = false;
   QString loadedConfigPath;
   QStringList attemptedConfigPaths;
+  QStringList candidateLoadFailures;
 
   for (const QString& candidate : configCandidates) {
     attemptedConfigPaths << candidate;
@@ -190,11 +191,23 @@ int runCoreApplication(int argc, char* argv[], const CoreBuildInfo& buildInfo) {
       loadedConfigPath = candidate;
       break;
     }
+
+    const QString loadError = ConfigService::instance().lastLoadError();
+    candidateLoadFailures <<
+        QString("%1 => %2")
+            .arg(candidate,
+                 loadError.isEmpty() ? QStringLiteral("load failed (no detail)") : loadError);
   }
 
   if (!configLoaded) {
+    if (!candidateLoadFailures.isEmpty()) {
+      Logger::instance().error(
+          QString("Configuration load failures: %1").arg(candidateLoadFailures.join(" | ")));
+    }
     Logger::instance().warning(QString("Using default configuration; attempted paths: %1")
                                    .arg(attemptedConfigPaths.join(", ")));
+    Logger::instance().warning(
+        "[STARTUP] CONFIG_FALLBACK_DEFAULTS=true (continuing with built-in defaults)");
   } else {
     Logger::instance().info(QString("Using configuration from %1").arg(loadedConfigPath));
   }
