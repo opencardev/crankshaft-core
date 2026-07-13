@@ -153,39 +153,54 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
     return false;
   }
 
-  GstPad* payloaderSrcPad = gst_element_get_static_pad(m_private->payloader, "src");
-  QString webrtcSinkTemplateName;
-  GstPad* webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
-  if (!payloaderSrcPad || !webrtcSinkPad) {
-    if (payloaderSrcPad) {
-      gst_object_unref(payloaderSrcPad);
+  if (!gst_element_link(m_private->payloader, m_private->webrtcBin)) {
+    GstPad* payloaderSrcPad = gst_element_get_static_pad(m_private->payloader, "src");
+    QString webrtcSinkTemplateName;
+    GstPad* webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
+    if (!payloaderSrcPad || !webrtcSinkPad) {
+      if (payloaderSrcPad) {
+        gst_object_unref(payloaderSrcPad);
+      }
+      if (webrtcSinkPad) {
+        gst_object_unref(webrtcSinkPad);
+      }
+      emit errorOccurred(
+          QStringLiteral("Failed to acquire WebRTC RTP sink pad (tried sink_%u, send_rtp_sink_%u)"));
+      deinitialize();
+      return false;
     }
-    if (webrtcSinkPad) {
-      gst_object_unref(webrtcSinkPad);
-    }
-    emit errorOccurred(QStringLiteral("Failed to acquire WebRTC RTP sink pad (tried sink_%u, send_rtp_sink_%u)"));
-    deinitialize();
-    return false;
-  }
 
-  const GstPadLinkReturn linkResult = gst_pad_link(payloaderSrcPad, webrtcSinkPad);
-  if (linkResult != GST_PAD_LINK_OK) {
-    const gchar* linkName = gst_pad_link_get_name(linkResult);
-    const QString linkReason = linkName ? QString::fromUtf8(linkName) : QStringLiteral("unknown");
-    if (linkName) {
-      g_free(const_cast<gchar*>(linkName));
+    GstCaps* webrtcSinkCaps = gst_caps_new_simple(
+        "application/x-rtp",
+        "media", G_TYPE_STRING, "video",
+        "encoding-name", G_TYPE_STRING, "H264",
+        "payload", G_TYPE_INT, static_cast<int>(kWebRtcPayloadType),
+        "clock-rate", G_TYPE_INT, 90000,
+        nullptr);
+    gst_pad_set_caps(webrtcSinkPad, webrtcSinkCaps);
+    gst_caps_unref(webrtcSinkCaps);
+
+    const GstPadLinkReturn linkResult = gst_pad_link(payloaderSrcPad, webrtcSinkPad);
+    if (linkResult != GST_PAD_LINK_OK) {
+      const gchar* linkName = gst_pad_link_get_name(linkResult);
+      const QString linkReason =
+          linkName ? QString::fromUtf8(linkName) : QStringLiteral("unknown");
+      if (linkName) {
+        g_free(const_cast<gchar*>(linkName));
+      }
+
+      gst_object_unref(payloaderSrcPad);
+      gst_object_unref(webrtcSinkPad);
+      emit errorOccurred(
+          QStringLiteral("Failed to connect RTP payload to webrtcbin (template=%1 pad_link=%2)")
+              .arg(webrtcSinkTemplateName, linkReason));
+      deinitialize();
+      return false;
     }
 
     gst_object_unref(payloaderSrcPad);
     gst_object_unref(webrtcSinkPad);
-    emit errorOccurred(
-      QStringLiteral("Failed to connect RTP payload to webrtcbin (template=%1 pad_link=%2)")
-        .arg(webrtcSinkTemplateName, linkReason));
-    deinitialize();
-    return false;
   }
-  gst_object_unref(payloaderSrcPad);
-  gst_object_unref(webrtcSinkPad);
 
   g_signal_connect(m_private->webrtcBin, "on-negotiation-needed", G_CALLBACK(+[](GstElement*,
                                                                                   gpointer userData) {
