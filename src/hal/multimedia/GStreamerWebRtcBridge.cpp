@@ -44,6 +44,30 @@ constexpr auto kSignalingPrefix = "android-auto/webrtc/";
 static auto extractStringField(const QVariantMap& payload, const QString& key) -> QString {
   return payload.value(key).toString().trimmed();
 }
+
+static auto requestWebRtcSinkPad(GstElement* webrtcBin, QString* requestedTemplateName)
+    -> GstPad* {
+  if (!webrtcBin) {
+    return nullptr;
+  }
+
+  static constexpr const char* kPadTemplates[] = {
+      "sink_%u",
+      "send_rtp_sink_%u",
+  };
+
+  for (const char* padTemplate : kPadTemplates) {
+    GstPad* pad = gst_element_request_pad_simple(webrtcBin, padTemplate);
+    if (pad) {
+      if (requestedTemplateName) {
+        *requestedTemplateName = QString::fromLatin1(padTemplate);
+      }
+      return pad;
+    }
+  }
+
+  return nullptr;
+}
 #endif
 }  // namespace
 
@@ -130,16 +154,33 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
   }
 
   GstPad* payloaderSrcPad = gst_element_get_static_pad(m_private->payloader, "src");
-  GstPad* webrtcSinkPad = gst_element_request_pad_simple(m_private->webrtcBin, "sink_%u");
-  if (!payloaderSrcPad || !webrtcSinkPad || gst_pad_link(payloaderSrcPad, webrtcSinkPad) !=
-                                                GST_PAD_LINK_OK) {
+  QString webrtcSinkTemplateName;
+  GstPad* webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
+  if (!payloaderSrcPad || !webrtcSinkPad) {
     if (payloaderSrcPad) {
       gst_object_unref(payloaderSrcPad);
     }
     if (webrtcSinkPad) {
       gst_object_unref(webrtcSinkPad);
     }
-    emit errorOccurred(QStringLiteral("Failed to connect RTP payload to webrtcbin"));
+    emit errorOccurred(QStringLiteral("Failed to acquire WebRTC RTP sink pad (tried sink_%u, send_rtp_sink_%u)"));
+    deinitialize();
+    return false;
+  }
+
+  const GstPadLinkReturn linkResult = gst_pad_link(payloaderSrcPad, webrtcSinkPad);
+  if (linkResult != GST_PAD_LINK_OK) {
+    const gchar* linkName = gst_pad_link_get_name(linkResult);
+    const QString linkReason = linkName ? QString::fromUtf8(linkName) : QStringLiteral("unknown");
+    if (linkName) {
+      g_free(const_cast<gchar*>(linkName));
+    }
+
+    gst_object_unref(payloaderSrcPad);
+    gst_object_unref(webrtcSinkPad);
+    emit errorOccurred(
+      QStringLiteral("Failed to connect RTP payload to webrtcbin (template=%1 pad_link=%2)")
+        .arg(webrtcSinkTemplateName, linkReason));
     deinitialize();
     return false;
   }
