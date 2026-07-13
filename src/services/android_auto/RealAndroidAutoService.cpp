@@ -2776,33 +2776,42 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
   m_videoWidthMargin = videoConfig.widthMargin;
   m_videoHeightMargin = videoConfig.heightMargin;
 
-    const QString configuredVideoTransportMode =
-      ConfigService::instance()
-        .get(QStringLiteral("video_transport_mode"),
-           ConfigService::instance().get(QStringLiteral("android_auto.video_transport_mode"),
-                         QVariant()))
-        .toString()
-        .trimmed();
+  const QString forcedVideoTransportMode =
+      resolveSettingString(settings,
+                           QStringLiteral("video_transport_mode"),
+                           QStringLiteral("core.services.android_auto.video_transport_mode"),
+                           QStringLiteral("core.android_auto.video_transport_mode"),
+                           QStringLiteral("video_transport_mode"),
+                           QString());
 
-    const QString settingsVideoTransportMode =
+  const QString profileVideoTransportMode =
       settings
-        .value(QStringLiteral("video_transport_mode"),
-           settings.value(QStringLiteral("video.transport_mode"),
-                  settings.value(QStringLiteral("android_auto.video_transport_mode"),
-                           QVariant())))
-        .toString()
-        .trimmed();
+          .value(QStringLiteral("video_transport_mode"),
+                 settings.value(QStringLiteral("video.transport_mode"),
+                                settings.value(QStringLiteral("android_auto.video_transport_mode"),
+                                               QVariant())))
+          .toString()
+          .trimmed();
 
-    const QString requestedVideoTransportMode =
-      !configuredVideoTransportMode.isEmpty()
-        ? configuredVideoTransportMode
-        : (!settingsVideoTransportMode.isEmpty() ? settingsVideoTransportMode
-                             : QStringLiteral("webrtc"));
+  const QString requestedVideoTransportMode =
+      !forcedVideoTransportMode.isEmpty()
+          ? forcedVideoTransportMode
+          : (!profileVideoTransportMode.isEmpty() ? profileVideoTransportMode
+                                                  : QStringLiteral("webrtc"));
 
-    m_requestedVideoTransportMode =
+  m_requestedVideoTransportMode =
       AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
-    m_videoTransportMode = m_requestedVideoTransportMode;
-    m_videoTransportFallbackReason.clear();
+  m_videoTransportMode = m_requestedVideoTransportMode;
+  m_videoTransportFallbackReason.clear();
+
+  if (!forcedVideoTransportMode.isEmpty() &&
+      !profileVideoTransportMode.isEmpty() &&
+      forcedVideoTransportMode.compare(profileVideoTransportMode, Qt::CaseInsensitive) != 0) {
+    Logger::instance().info(
+        QString("[RealAndroidAutoService] Overriding profile transport mode '%1' with configured mode '%2'")
+            .arg(profileVideoTransportMode)
+            .arg(forcedVideoTransportMode));
+  }
   Logger::instance().info(QString("[RealAndroidAutoService] Configured video transport mode: %1")
                               .arg(AndroidAutoService::videoTransportModeToString(m_videoTransportMode)));
 
