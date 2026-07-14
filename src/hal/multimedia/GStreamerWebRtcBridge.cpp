@@ -182,30 +182,45 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
     return false;
   }
 
-  if (!gst_element_link(m_private->payloader, m_private->webrtcBin)) {
+  auto bootstrapVideoTransceiver = [this]() {
+    GstCaps* transceiverCaps = gst_caps_new_simple(
+        "application/x-rtp",
+        "media", G_TYPE_STRING, "video",
+        "encoding-name", G_TYPE_STRING, "H264",
+        "payload", G_TYPE_INT, static_cast<int>(kWebRtcPayloadType),
+        "clock-rate", G_TYPE_INT, 90000,
+        nullptr);
+    GstWebRTCRTPTransceiver* transceiver = nullptr;
+    g_signal_emit_by_name(m_private->webrtcBin, "add-transceiver",
+                          GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY,
+                          transceiverCaps, &transceiver);
+    if (transceiver) {
+      gst_object_unref(transceiver);
+    }
+    gst_caps_unref(transceiverCaps);
+  };
+
+  bool linkedPayloader = gst_element_link(m_private->payloader, m_private->webrtcBin);
+  if (!linkedPayloader) {
+    // Some webrtcbin versions only expose/link sink pads after an explicit
+    // sender transceiver is created.
+    bootstrapVideoTransceiver();
+    linkedPayloader = gst_element_link(m_private->payloader, m_private->webrtcBin);
+  }
+
+  if (!linkedPayloader) {
     GstPad* payloaderSrcPad = gst_element_get_static_pad(m_private->payloader, "src");
     QString webrtcSinkTemplateName;
     GstPad* webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
     if (!webrtcSinkPad) {
-      // Some webrtcbin versions only expose request pads after an explicit
-      // sender transceiver is created.
-      GstCaps* transceiverCaps = gst_caps_new_simple(
-          "application/x-rtp",
-          "media", G_TYPE_STRING, "video",
-          "encoding-name", G_TYPE_STRING, "H264",
-          "payload", G_TYPE_INT, static_cast<int>(kWebRtcPayloadType),
-          "clock-rate", G_TYPE_INT, 90000,
-          nullptr);
-      GstWebRTCRTPTransceiver* transceiver = nullptr;
-      g_signal_emit_by_name(m_private->webrtcBin, "add-transceiver",
-                            GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY,
-                            transceiverCaps, &transceiver);
-      if (transceiver) {
-        gst_object_unref(transceiver);
-      }
-      gst_caps_unref(transceiverCaps);
-
+      bootstrapVideoTransceiver();
       webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
+    }
+    if (!webrtcSinkPad) {
+      webrtcSinkPad = gst_element_get_static_pad(m_private->webrtcBin, "sink_0");
+      if (webrtcSinkPad) {
+        webrtcSinkTemplateName = QStringLiteral("sink_0");
+      }
     }
 
     if (!payloaderSrcPad || !webrtcSinkPad) {
