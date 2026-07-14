@@ -25,6 +25,7 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QStringList>
 
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
@@ -97,6 +98,69 @@ static auto requestWebRtcSinkPad(GstElement* webrtcBin, QString* requestedTempla
 
   return nullptr;
 }
+
+static auto runWebRtcRuntimePreflight(QString* failureReason) -> bool {
+  QStringList missingFactories;
+  static constexpr const char* kRequiredFactories[] = {
+      "webrtcbin",
+      "rtph264pay",
+      "h264parse",
+      "appsrc",
+      "dtlssrtpenc",
+      "dtlssrtpdec",
+      "srtpenc",
+      "srtpdec",
+      "nicesrc",
+      "nicesink",
+  };
+
+  for (const char* factoryName : kRequiredFactories) {
+    GstElementFactory* factory = gst_element_factory_find(factoryName);
+    if (!factory) {
+      missingFactories.append(QString::fromLatin1(factoryName));
+      continue;
+    }
+    gst_object_unref(factory);
+  }
+
+  if (!missingFactories.isEmpty()) {
+    if (failureReason) {
+      *failureReason =
+          QStringLiteral("missing element factories: %1").arg(missingFactories.join(','));
+    }
+    return false;
+  }
+
+  GError* parseError = nullptr;
+  GstElement* probePipeline = gst_parse_launch(
+      "fakesrc num-buffers=1 ! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! webrtcbin name=wb",
+      &parseError);
+  if (!probePipeline) {
+    if (failureReason) {
+      *failureReason = parseError
+                           ? QStringLiteral("pipeline parse failed: %1")
+                                 .arg(QString::fromUtf8(parseError->message))
+                           : QStringLiteral("pipeline parse failed: unknown error");
+    }
+    if (parseError) {
+      g_error_free(parseError);
+    }
+    return false;
+  }
+
+  const GstStateChangeReturn readyResult = gst_element_set_state(probePipeline, GST_STATE_READY);
+  gst_element_set_state(probePipeline, GST_STATE_NULL);
+  gst_object_unref(probePipeline);
+
+  if (readyResult == GST_STATE_CHANGE_FAILURE) {
+    if (failureReason) {
+      *failureReason = QStringLiteral("probe pipeline failed to enter READY state");
+    }
+    return false;
+  }
+
+  return true;
+}
 #endif
 }  // namespace
 
@@ -146,6 +210,13 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
   emit errorOccurred(QStringLiteral("GStreamer WebRTC support is not available in this build"));
   return false;
 #else
+  QString preflightFailure;
+  if (!runWebRtcRuntimePreflight(&preflightFailure)) {
+    emit errorOccurred(
+        QStringLiteral("WebRTC runtime preflight failed: %1").arg(preflightFailure));
+    return false;
+  }
+
   m_private->pipeline = gst_pipeline_new("android-auto-webrtc");
   m_private->appSrc = gst_element_factory_make("appsrc", "webrtc-source");
   m_private->h264Parse = gst_element_factory_make("h264parse", "webrtc-h264parse");
