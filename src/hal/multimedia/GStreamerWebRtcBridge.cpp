@@ -51,6 +51,36 @@ static auto requestWebRtcSinkPad(GstElement* webrtcBin, QString* requestedTempla
     return nullptr;
   }
 
+  // Prefer requesting from advertised sink templates first so we work across
+  // different webrtcbin template names and plugin versions.
+  GstElementClass* elementClass = GST_ELEMENT_GET_CLASS(webrtcBin);
+  if (elementClass) {
+    const GList* padTemplates = gst_element_class_get_pad_template_list(elementClass);
+    for (const GList* node = padTemplates; node != nullptr; node = node->next) {
+      auto* templ = static_cast<GstPadTemplate*>(node->data);
+      if (!templ) {
+        continue;
+      }
+
+      if (GST_PAD_TEMPLATE_DIRECTION(templ) != GST_PAD_SINK) {
+        continue;
+      }
+
+      if (GST_PAD_TEMPLATE_PRESENCE(templ) != GST_PAD_REQUEST) {
+        continue;
+      }
+
+      GstPad* pad = gst_element_request_pad(webrtcBin, templ, nullptr, nullptr);
+      if (pad) {
+        if (requestedTemplateName) {
+          requestedTemplateName = requestedTemplateName;
+          *requestedTemplateName = QString::fromLatin1(GST_PAD_TEMPLATE_NAME_TEMPLATE(templ));
+        }
+        return pad;
+      }
+    }
+  }
+
   static constexpr const char* kPadTemplates[] = {
       "sink_%u",
       "send_rtp_sink_%u",
