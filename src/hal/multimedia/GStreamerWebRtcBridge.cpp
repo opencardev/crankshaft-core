@@ -73,7 +73,6 @@ static auto requestWebRtcSinkPad(GstElement* webrtcBin, QString* requestedTempla
       GstPad* pad = gst_element_request_pad(webrtcBin, templ, nullptr, nullptr);
       if (pad) {
         if (requestedTemplateName) {
-          requestedTemplateName = requestedTemplateName;
           *requestedTemplateName = QString::fromLatin1(GST_PAD_TEMPLATE_NAME_TEMPLATE(templ));
         }
         return pad;
@@ -187,6 +186,28 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
     GstPad* payloaderSrcPad = gst_element_get_static_pad(m_private->payloader, "src");
     QString webrtcSinkTemplateName;
     GstPad* webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
+    if (!webrtcSinkPad) {
+      // Some webrtcbin versions only expose request pads after an explicit
+      // sender transceiver is created.
+      GstCaps* transceiverCaps = gst_caps_new_simple(
+          "application/x-rtp",
+          "media", G_TYPE_STRING, "video",
+          "encoding-name", G_TYPE_STRING, "H264",
+          "payload", G_TYPE_INT, static_cast<int>(kWebRtcPayloadType),
+          "clock-rate", G_TYPE_INT, 90000,
+          nullptr);
+      GstWebRTCRTPTransceiver* transceiver = nullptr;
+      g_signal_emit_by_name(m_private->webrtcBin, "add-transceiver",
+                            GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY,
+                            transceiverCaps, &transceiver);
+      if (transceiver) {
+        gst_object_unref(transceiver);
+      }
+      gst_caps_unref(transceiverCaps);
+
+      webrtcSinkPad = requestWebRtcSinkPad(m_private->webrtcBin, &webrtcSinkTemplateName);
+    }
+
     if (!payloaderSrcPad || !webrtcSinkPad) {
       if (payloaderSrcPad) {
         gst_object_unref(payloaderSrcPad);
@@ -195,7 +216,7 @@ bool GStreamerWebRtcBridge::initialize(const QSize& streamResolution, int fps) {
         gst_object_unref(webrtcSinkPad);
       }
       emit errorOccurred(
-          QStringLiteral("Failed to acquire WebRTC RTP sink pad (tried sink_%u, send_rtp_sink_%u)"));
+          QStringLiteral("Failed to acquire WebRTC RTP sink pad (tried templates, sink_%u, send_rtp_sink_%u, and add-transceiver bootstrap)"));
       deinitialize();
       return false;
     }
