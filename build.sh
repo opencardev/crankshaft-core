@@ -151,6 +151,19 @@ install_deps() {
     packages+=("${pkg}")
   done < <(read_pkgs "${pkg_file}")
 
+  # Enforce WebRTC runtime plugin dependencies required by webrtcbin ICE setup.
+  # Keep this safety net in build.sh so --install-deps remains correct even if
+  # distro manifests are temporarily out of sync.
+  local -a required_runtime_packages=(
+    gstreamer1.0-nice
+  )
+  local required_pkg
+  for required_pkg in "${required_runtime_packages[@]}"; do
+    if [[ ! " ${packages[*]} " =~ " ${required_pkg} " ]]; then
+      packages+=("${required_pkg}")
+    fi
+  done
+
   if [[ "${CODE_QUALITY}" == "ON" ]] && [[ -f "${deps_dir}/packages-quality.txt" ]]; then
     while IFS= read -r pkg; do
       packages+=("${pkg}")

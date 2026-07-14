@@ -15,6 +15,8 @@ If runtime prerequisites are missing on target, Crankshaft must explicitly fall 
    - `preflight-pass`: continue WebRTC validation.
    - `preflight-fail`: stop WebRTC debugging and resolve runtime dependencies.
 
+Preflight now requires a probe pipeline to transition through `PLAYING` and checks for GStreamer bus runtime errors. This catches environments where factories exist but runtime plugins are still incomplete.
+
 ## Runtime Preconditions
 
 Target must provide these GStreamer element factories:
@@ -68,6 +70,11 @@ Action:
 - Treat as environment/package issue, not bridge-linking logic issue.
 - Keep transport on `websocket-jpeg` until dependencies are installed.
 - Do not iterate on sink pad linking code.
+
+Common signatures under this outcome:
+
+- `probe pipeline runtime error: ... missing a plug-in`
+- `probe pipeline failed to enter PLAYING state`
 
 ### Outcome B: Preflight pass, bridge fail
 

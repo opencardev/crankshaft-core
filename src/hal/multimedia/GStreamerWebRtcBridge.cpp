@@ -149,12 +149,68 @@ static auto runWebRtcRuntimePreflight(QString* failureReason) -> bool {
   }
 
   const GstStateChangeReturn readyResult = gst_element_set_state(probePipeline, GST_STATE_READY);
+  if (readyResult == GST_STATE_CHANGE_FAILURE) {
+    gst_element_set_state(probePipeline, GST_STATE_NULL);
+    gst_object_unref(probePipeline);
+    if (failureReason) {
+      *failureReason = QStringLiteral("probe pipeline failed to enter READY state");
+    }
+    return false;
+  }
+
+  // READY is not sufficient for webrtcbin runtime readiness on some systems;
+  // require a PLAYING transition and surface any bus error details.
+  const GstStateChangeReturn playingResult = gst_element_set_state(probePipeline, GST_STATE_PLAYING);
+  if (playingResult == GST_STATE_CHANGE_FAILURE) {
+    gst_element_set_state(probePipeline, GST_STATE_NULL);
+    gst_object_unref(probePipeline);
+    if (failureReason) {
+      *failureReason = QStringLiteral("probe pipeline failed to enter PLAYING state");
+    }
+    return false;
+  }
+
+  GstBus* probeBus = gst_element_get_bus(probePipeline);
+  GstState currentState = GST_STATE_NULL;
+  GstState pendingState = GST_STATE_NULL;
+  const GstStateChangeReturn stateResult =
+      gst_element_get_state(probePipeline, &currentState, &pendingState, 2 * GST_SECOND);
+
+  GError* runtimeError = nullptr;
+  gchar* runtimeDebug = nullptr;
+  if (probeBus) {
+    GstMessage* errorMsg =
+        gst_bus_pop_filtered(probeBus, static_cast<GstMessageType>(GST_MESSAGE_ERROR));
+    if (errorMsg) {
+      gst_message_parse_error(errorMsg, &runtimeError, &runtimeDebug);
+      gst_message_unref(errorMsg);
+    }
+    gst_object_unref(probeBus);
+  }
+
   gst_element_set_state(probePipeline, GST_STATE_NULL);
   gst_object_unref(probePipeline);
 
-  if (readyResult == GST_STATE_CHANGE_FAILURE) {
+  if (runtimeError) {
     if (failureReason) {
-      *failureReason = QStringLiteral("probe pipeline failed to enter READY state");
+      const QString errText = QString::fromUtf8(runtimeError->message);
+      const QString dbgText = runtimeDebug ? QString::fromUtf8(runtimeDebug) : QString();
+      *failureReason = dbgText.isEmpty()
+                           ? QStringLiteral("probe pipeline runtime error: %1").arg(errText)
+                           : QStringLiteral("probe pipeline runtime error: %1 (debug=%2)")
+                                 .arg(errText, dbgText);
+    }
+    g_error_free(runtimeError);
+    if (runtimeDebug) {
+      g_free(runtimeDebug);
+    }
+    return false;
+  }
+
+  if (!(stateResult == GST_STATE_CHANGE_SUCCESS || stateResult == GST_STATE_CHANGE_ASYNC ||
+        currentState == GST_STATE_PLAYING)) {
+    if (failureReason) {
+      *failureReason = QStringLiteral("probe pipeline did not reach PLAYING state");
     }
     return false;
   }
