@@ -20,6 +20,7 @@ libqt6sql6-sqlite
 libgstreamer1.0-dev
 libgstreamer-plugins-base1.0-dev
 libgstreamer-plugins-bad1.0-dev
+gstreamer1.0-nice
 libnice-dev
 libsrtp2-dev
 libdbus-1-dev
