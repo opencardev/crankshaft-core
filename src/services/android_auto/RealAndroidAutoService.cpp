@@ -7101,6 +7101,50 @@ void RealAndroidAutoService::onChannelError(const QString& channelName, const QS
   const bool isControlVersionTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Version request timed out after"));
+  const bool isNonControlChannel = channelName != QStringLiteral("control");
+  const bool preHandshakeWindowActive =
+      m_state == ConnectionState::CONNECTED && !m_controlVersionReceived &&
+      !m_serviceDiscoveryCompleted;
+
+  if (isNonControlChannel && preHandshakeWindowActive) {
+    const int graceWindowMs = getBoundedConfigValue(
+        "core.android_auto.channels.pre_handshake_error_grace_window_ms", 8000, 1000, 30000);
+    const int graceMaxErrors = getBoundedConfigValue(
+        "core.android_auto.channels.pre_handshake_error_grace_max_count", 6, 1, 50);
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_preHandshakeNonControlChannelErrorWindowStartMs <= 0 ||
+        (nowMs - m_preHandshakeNonControlChannelErrorWindowStartMs) > graceWindowMs) {
+      m_preHandshakeNonControlChannelErrorWindowStartMs = nowMs;
+      m_preHandshakeNonControlChannelErrorCount = 0;
+    }
+
+    ++m_preHandshakeNonControlChannelErrorCount;
+    const qint64 elapsedMs = nowMs - m_preHandshakeNonControlChannelErrorWindowStartMs;
+
+    aaLogWarning(
+        "channelError",
+        QString("channel=%1 state=%2 details=%3 -> pre-handshake non-control grace %4/%5 "
+                "(elapsed_ms=%6, control_version_received=%7, service_discovery_completed=%8)")
+            .arg(channelName)
+            .arg(connectionStateToString(m_state))
+            .arg(error)
+            .arg(m_preHandshakeNonControlChannelErrorCount)
+            .arg(graceMaxErrors)
+            .arg(elapsedMs)
+            .arg(m_controlVersionReceived ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_serviceDiscoveryCompleted ? QStringLiteral("true") : QStringLiteral("false")));
+
+    if (m_preHandshakeNonControlChannelErrorCount <= graceMaxErrors) {
+      return;
+    }
+
+    aaLogWarning("channelError",
+                 QString("pre-handshake non-control channel errors exceeded grace threshold; "
+                         "escalating to normal recovery path (%1 > %2)")
+                     .arg(m_preHandshakeNonControlChannelErrorCount)
+                     .arg(graceMaxErrors));
+  }
 
   if (isRecoverableReceiveError && m_state == ConnectionState::CONNECTED) {
     aaLogWarning(
@@ -7116,6 +7160,12 @@ void RealAndroidAutoService::onChannelError(const QString& channelName, const QS
   const bool isControlHandshakeTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Handshake activation timed out after"));
+
+  if (channelName == QStringLiteral("control") || m_controlVersionReceived ||
+      m_serviceDiscoveryCompleted) {
+    m_preHandshakeNonControlChannelErrorCount = 0;
+    m_preHandshakeNonControlChannelErrorWindowStartMs = 0;
+  }
 
   if (channelName == QStringLiteral("video")) {
     m_videoStarted = false;

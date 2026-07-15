@@ -92,6 +92,13 @@ WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
       m_secureModeEnabled(false) {
   Logger::instance().info(QString("Initializing WebSocket server on port %1...").arg(port));
 
+  m_renegotiationCooldownMs = qBound(
+    1000,
+    ConfigService::instance()
+      .get("core.android_auto.websocket.renegotiation_cooldown_ms", 8000)
+      .toInt(),
+    60000);
+
   if (m_server->listen(QHostAddress::Any, port)) {
     Logger::instance().info(QString("WebSocket server listening on port %1 (ws://)").arg(port));
     connect(m_server, &QWebSocketServer::newConnection, this, &WebSocketServer::onNewConnection);
@@ -267,12 +274,32 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
         }
       } else if (topic == QStringLiteral("android-auto/renegotiate") ||
                  topic == QStringLiteral("android-auto/reconnect")) {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const qint64 elapsedSinceLastMs =
+          m_lastRenegotiationRequestMs > 0 ? (nowMs - m_lastRenegotiationRequestMs) : LLONG_MAX;
+        if (m_lastRenegotiationRequestMs > 0 &&
+          elapsedSinceLastMs >= 0 && elapsedSinceLastMs < m_renegotiationCooldownMs) {
+          const qint64 remainingMs = m_renegotiationCooldownMs - elapsedSinceLastMs;
+          Logger::instance().warning(
+            QString("[WebSocketServer] Suppressed Android Auto renegotiation (cooldown active, "
+                "remaining %1 ms, elapsed %2 ms, topic=%3)")
+              .arg(remainingMs)
+              .arg(elapsedSinceLastMs)
+              .arg(topic));
+          return;
+        }
+
+        m_lastRenegotiationRequestMs = nowMs;
+
         const int relaunchDelayMs =
             qBound(1500, payload.value(QStringLiteral("relaunch_delay_ms"), 2500).toInt(), 30000);
 
         Logger::instance().info(
-            QString("[WebSocketServer] Forcing Android Auto renegotiation (relaunch delay %1 ms)")
-                .arg(relaunchDelayMs));
+          QString("[WebSocketServer] Accepting Android Auto renegotiation "
+              "(topic=%1, relaunch delay %2 ms, cooldown %3 ms)")
+            .arg(topic)
+            .arg(relaunchDelayMs)
+            .arg(m_renegotiationCooldownMs));
 
         aaService->disconnect();
 
