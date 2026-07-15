@@ -345,4 +345,6 @@ class WebSocketServer : public QObject {
   quint64 m_audioChunkSequence{0};
   QJsonObject m_lastProjectionStatus;
   bool m_hasProjectionStatus{false};
+  qint64 m_lastRenegotiationRequestMs{0};
+  int m_renegotiationCooldownMs{8000};
 };

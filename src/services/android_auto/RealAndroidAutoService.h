@@ -391,6 +391,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_projectionIdleRecoveryCount{0};
   int m_projectionStreamNudgeCount{0};
   qint64 m_projectionStreamLastNudgeMs{0};
+  // Tracks non-control channel errors that happen before control/service
+  // discovery completes so startup can tolerate transient races without
+  // immediately tearing down the whole connection.
+  int m_preHandshakeNonControlChannelErrorCount{0};
+  qint64 m_preHandshakeNonControlChannelErrorWindowStartMs{0};
   // Epoch counter increments for each logical stream-nudge attempt
   int m_projectionStreamNudgeEpoch{0};
   // Last epoch that was counted towards the pre-start consecutive timeout counter
