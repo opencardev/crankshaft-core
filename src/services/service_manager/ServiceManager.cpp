@@ -452,7 +452,10 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
             .arg(readinessGraceDelayMs)
             .arg(relaunchDelayMs));
 
-    QTimer::singleShot(renegotiateDelayMs, this, [this, relaunchDelayMs, readinessGraceDelayMs]() {
+    QTimer::singleShot(renegotiateDelayMs, this,
+               [this, relaunchDelayMs, readinessGraceDelayMs,
+              startupRenegotiationCooldownMs, unstableDisconnectThreshold,
+              unstableDisconnectQuietPeriodMs]() {
       if (!m_androidAutoService) {
         return;
       }
