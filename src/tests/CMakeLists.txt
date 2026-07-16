@@ -13,7 +13,7 @@ target_include_directories(crankshaft-core-tests PRIVATE
 )
 
 target_link_libraries(crankshaft-core-tests PRIVATE crankshaft-core-lib gtest gmock)
-target_link_libraries(crankshaft-core-tests PRIVATE Qt6::Core Qt6::Multimedia)
+target_link_libraries(crankshaft-core-tests PRIVATE Qt6::Core Qt6::Multimedia Qt6::WebSockets)
 
 enable_testing()
 add_test(NAME crankshaft-core-tests COMMAND crankshaft-core-tests)
