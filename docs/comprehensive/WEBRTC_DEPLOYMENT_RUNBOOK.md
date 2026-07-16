@@ -34,6 +34,44 @@ Target must provide these GStreamer element factories:
 
 If any are missing, WebRTC bridge initialization is expected to fail.
 
+## Runtime Control Toggles (Core)
+
+These keys are runtime guardrails. Defaults are conservative and permissive-first.
+
+### WebSocket client contract toggles
+
+- `core.websocket.client_contract.require_hello` (default: `false`)
+  - When `true`, clients must send `client_hello` before subscribe/publish/service_command actions are accepted.
+- `core.websocket.client_contract.required_protocol_version` (default: `1`)
+  - Minimum supported `client_protocol_version` in `client_hello`.
+- `core.websocket.client_contract.min_client_major` (default: `0`)
+  - Optional minimum accepted client semantic major version (`0` disables this check).
+- `core.websocket.client_contract.require_aa_capability` (default: `false`)
+  - When `true`, `client_hello` must include `android_auto` capability.
+
+### Renegotiation storm guard toggles
+
+- `core.android_auto.websocket.renegotiation_cooldown_ms` (default: `8000`)
+  - Minimum time between accepted renegotiation/reconnect requests.
+- `core.android_auto.websocket.renegotiation_connected_grace_ms` (default: `20000`)
+  - Suppress renegotiation requests during early CONNECTED warm-up when projection/control discovery progress exists.
+
+### Startup churn guard toggles
+
+- `core.android_auto.startup.renegotiate_disconnect_threshold` (default: `3`)
+  - Disconnect count threshold before startup renegotiation is suppressed.
+- `core.android_auto.startup.renegotiate_disconnect_window_ms` (default: `15000`)
+  - Sliding window for counting startup disconnects.
+- `core.android_auto.startup.renegotiate_startup_grace_ms` (default: `20000`)
+  - Time window after startup where churn guard suppression rules apply.
+
+## Rollout Guidance for Client Contract Enforcement
+
+1. Start with permissive mode (`require_hello=false`) and deploy clients that send `client_hello`.
+2. Monitor logs for client_hello acceptance/rejection reasons.
+3. Raise `required_protocol_version` only after compatibility evidence.
+4. Enable `require_aa_capability` and finally `require_hello=true` once all active clients are compliant.
+
 ## One-Shot Validation Commands (Pi)
 
 ### 1) Service restart

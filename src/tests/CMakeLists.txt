@@ -5,6 +5,7 @@ add_executable(crankshaft-core-tests
     test_audio_router.cpp
     test_aasdk_error_classification.cpp
     test_android_auto_transport_mode.cpp
+    test_websocket_client_contract.cpp
 )
 
 target_include_directories(crankshaft-core-tests PRIVATE

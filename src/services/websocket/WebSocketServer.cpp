@@ -274,14 +274,19 @@ bool WebSocketServer::isClientContractSatisfied(QWebSocket* client) const {
     return false;
   }
 
-  if (!m_requireClientHello) {
+  return isClientContractSatisfied(m_requireClientHello, m_clientHelloReceived.value(client, false));
+}
+
+bool WebSocketServer::isClientContractSatisfied(bool requireClientHello,
+                                                bool clientHelloReceived) {
+  if (!requireClientHello) {
     return true;
   }
 
-  return m_clientHelloReceived.value(client, false);
+  return clientHelloReceived;
 }
 
-int WebSocketServer::parseVersionMajor(const QString& version) const {
+int WebSocketServer::parseVersionMajor(const QString& version) {
   static const QRegularExpression majorPattern(QStringLiteral("^(\\d+)"));
   const QRegularExpressionMatch match = majorPattern.match(version.trimmed());
   if (!match.hasMatch()) {
@@ -291,6 +296,49 @@ int WebSocketServer::parseVersionMajor(const QString& version) const {
   bool ok = false;
   const int major = match.captured(1).toInt(&ok);
   return ok ? major : -1;
+}
+
+WebSocketServer::ClientHelloDecision WebSocketServer::evaluateClientHello(
+    const ClientHelloPayload& payload,
+    const ClientHelloContractConfig& config) {
+  if (payload.clientKind.trimmed().isEmpty()) {
+    return ClientHelloDecision::MissingClientKind;
+  }
+
+  if (payload.protocolVersion < config.requiredClientProtocolVersion) {
+    return ClientHelloDecision::ProtocolMismatch;
+  }
+
+  if (config.minClientVersionMajor > 0) {
+    const int majorVersion = parseVersionMajor(payload.clientVersion);
+    if (majorVersion >= 0 && majorVersion < config.minClientVersionMajor) {
+      return ClientHelloDecision::VersionTooOld;
+    }
+  }
+
+  if (config.requireAndroidAutoCapability &&
+      !payload.capabilities.contains(QStringLiteral("android_auto"))) {
+    return ClientHelloDecision::MissingRequiredCapability;
+  }
+
+  return ClientHelloDecision::Accepted;
+}
+
+QString WebSocketServer::clientHelloDecisionError(ClientHelloDecision decision) {
+  switch (decision) {
+    case ClientHelloDecision::Accepted:
+      return QString();
+    case ClientHelloDecision::MissingClientKind:
+      return QStringLiteral("client_hello_missing_client_kind");
+    case ClientHelloDecision::ProtocolMismatch:
+      return QStringLiteral("client_hello_protocol_mismatch");
+    case ClientHelloDecision::VersionTooOld:
+      return QStringLiteral("client_hello_version_too_old");
+    case ClientHelloDecision::MissingRequiredCapability:
+      return QStringLiteral("client_hello_missing_required_capability");
+  }
+
+  return QStringLiteral("client_hello_rejected");
 }
 
 void WebSocketServer::handleClientHello(QWebSocket* client, const QVariantMap& payload) {
@@ -311,52 +359,22 @@ void WebSocketServer::handleClientHello(QWebSocket* client, const QVariantMap& p
     }
   }
 
-  if (clientKind.isEmpty()) {
-    Logger::instance().warning("[WebSocketServer] Rejecting client hello: missing client_kind");
-    sendError(client, QStringLiteral("client_hello_missing_client_kind"));
-    if (m_requireClientHello) {
-      client->close();
-    }
-    return;
-  }
+  const ClientHelloPayload helloPayload{clientKind, clientVersion, protocolVersion, capabilities};
+  const ClientHelloContractConfig contractConfig{m_requireClientHello,
+                                                 m_requiredClientProtocolVersion,
+                                                 m_minClientVersionMajor,
+                                                 m_requireAndroidAutoCapability};
+  const ClientHelloDecision decision = evaluateClientHello(helloPayload, contractConfig);
 
-  if (protocolVersion < m_requiredClientProtocolVersion) {
+  if (decision != ClientHelloDecision::Accepted) {
+    const QString errorCode = clientHelloDecisionError(decision);
     Logger::instance().warning(
-        QString("[WebSocketServer] Rejecting client hello: protocol mismatch kind=%1 version=%2 "
-                "protocol=%3 required=%4")
+        QString("[WebSocketServer] Rejecting client hello: kind=%1 version=%2 protocol=%3 error=%4")
             .arg(clientKind)
             .arg(clientVersion)
             .arg(protocolVersion)
-            .arg(m_requiredClientProtocolVersion));
-    sendError(client, QStringLiteral("client_hello_protocol_mismatch"));
-    if (m_requireClientHello) {
-      client->close();
-    }
-    return;
-  }
-
-  if (m_minClientVersionMajor > 0) {
-    const int majorVersion = parseVersionMajor(clientVersion);
-    if (majorVersion >= 0 && majorVersion < m_minClientVersionMajor) {
-      Logger::instance().warning(
-          QString("[WebSocketServer] Rejecting client hello: client major version too old "
-                  "kind=%1 version=%2 min_major=%3")
-              .arg(clientKind)
-              .arg(clientVersion)
-              .arg(m_minClientVersionMajor));
-      sendError(client, QStringLiteral("client_hello_version_too_old"));
-      if (m_requireClientHello) {
-        client->close();
-      }
-      return;
-    }
-  }
-
-  if (m_requireAndroidAutoCapability && !capabilities.contains(QStringLiteral("android_auto"))) {
-    Logger::instance().warning(
-        QString("[WebSocketServer] Rejecting client hello: required capability missing kind=%1")
-            .arg(clientKind));
-    sendError(client, QStringLiteral("client_hello_missing_required_capability"));
+            .arg(errorCode));
+    sendError(client, errorCode);
     if (m_requireClientHello) {
       client->close();
     }

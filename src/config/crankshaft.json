@@ -2,7 +2,13 @@
   "core": {
     "websocket": {
       "port": 8080,
-      "host": "0.0.0.0"
+      "host": "0.0.0.0",
+      "client_contract": {
+        "require_hello": false,
+        "required_protocol_version": 1,
+        "min_client_major": 0,
+        "require_aa_capability": false
+      }
     },
     "android_auto": {
       "startup_profile": "compat_openauto_profile",
@@ -54,7 +60,16 @@
       "force_renegotiate_on_startup": false,
       "renegotiate_on_startup_delay_ms": 12000,
       "renegotiate_readiness_grace_delay_ms": 10000,
-      "renegotiate_relaunch_delay_ms": 2500
+      "renegotiate_relaunch_delay_ms": 2500,
+      "websocket": {
+        "renegotiation_cooldown_ms": 8000,
+        "renegotiation_connected_grace_ms": 20000
+      },
+      "startup": {
+        "renegotiate_disconnect_threshold": 3,
+        "renegotiate_disconnect_window_ms": 15000,
+        "renegotiate_startup_grace_ms": 20000
+      }
     },
     "logging": {
       "level": "info",
