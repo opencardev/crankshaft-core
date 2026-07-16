@@ -194,6 +194,28 @@ class WebSocketServer : public QObject {
   Q_OBJECT
 
  public:
+  struct ClientHelloContractConfig {
+    bool requireClientHello{false};
+    int requiredClientProtocolVersion{1};
+    int minClientVersionMajor{0};
+    bool requireAndroidAutoCapability{false};
+  };
+
+  struct ClientHelloPayload {
+    QString clientKind;
+    QString clientVersion;
+    int protocolVersion{0};
+    QSet<QString> capabilities;
+  };
+
+  enum class ClientHelloDecision {
+    Accepted = 0,
+    MissingClientKind,
+    ProtocolMismatch,
+    VersionTooOld,
+    MissingRequiredCapability
+  };
+
   /**
    * @brief Construct WebSocket server on specified port
    * @param port Port number to listen on (e.g. 8080)
@@ -229,6 +251,13 @@ class WebSocketServer : public QObject {
    * @return true if wss:// connections are supported
    */
   [[nodiscard]] auto isSecureModeEnabled() const -> bool;
+
+  [[nodiscard]] static auto isClientContractSatisfied(bool requireClientHello,
+                                                      bool clientHelloReceived) -> bool;
+  [[nodiscard]] static auto evaluateClientHello(const ClientHelloPayload& payload,
+                                                const ClientHelloContractConfig& config)
+      -> ClientHelloDecision;
+  [[nodiscard]] static auto clientHelloDecisionError(ClientHelloDecision decision) -> QString;
 
   /**
    * @brief Inject service manager for event relay
@@ -318,7 +347,7 @@ class WebSocketServer : public QObject {
 
   [[nodiscard]] auto isClientContractSatisfied(QWebSocket* client) const -> bool;
   void handleClientHello(QWebSocket* client, const QVariantMap& payload);
-  [[nodiscard]] auto parseVersionMajor(const QString& version) const -> int;
+  [[nodiscard]] static auto parseVersionMajor(const QString& version) -> int;
 
   /**
    * @brief Check if provided topic matches a subscription pattern
