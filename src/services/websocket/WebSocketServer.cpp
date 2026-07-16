@@ -26,6 +26,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSslCertificate>
 #include <QSslKey>
 #include <QStringList>
@@ -104,6 +105,22 @@ WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
         .get("core.android_auto.websocket.renegotiation_connected_grace_ms", 20000)
         .toInt(),
       180000);
+      m_requireClientHello =
+        ConfigService::instance().get("core.websocket.client_contract.require_hello", false).toBool();
+      m_requiredClientProtocolVersion = qBound(
+        1,
+        ConfigService::instance()
+          .get("core.websocket.client_contract.required_protocol_version", 1)
+          .toInt(),
+        100);
+      m_minClientVersionMajor = qBound(
+        0,
+        ConfigService::instance().get("core.websocket.client_contract.min_client_major", 0).toInt(),
+        1000);
+      m_requireAndroidAutoCapability = ConfigService::instance()
+                         .get("core.websocket.client_contract.require_aa_capability",
+                          false)
+                         .toBool();
 
   if (m_server->listen(QHostAddress::Any, port)) {
     Logger::instance().info(QString("WebSocket server listening on port %1 (ws://)").arg(port));
@@ -155,6 +172,11 @@ void WebSocketServer::onNewConnection() {
 
   m_clients.append(client);
   m_subscriptions[client] = QStringList();
+  m_clientHelloReceived[client] = false;
+  m_clientVersion[client] = QString();
+  m_clientKind[client] = QStringLiteral("unknown");
+  m_clientProtocolVersion[client] = 0;
+  m_clientCapabilities[client] = QSet<QString>();
 }
 
 void WebSocketServer::onTextMessageReceived(const QString& message) {
@@ -181,16 +203,39 @@ void WebSocketServer::onTextMessageReceived(const QString& message) {
   QString type = obj.value("type").toString();
 
   if (type == "subscribe") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString topic = obj.value("topic").toString();
     handleSubscribe(client, topic);
   } else if (type == "unsubscribe") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString topic = obj.value("topic").toString();
     handleUnsubscribe(client, topic);
   } else if (type == "publish") {
     QString topic = obj.value("topic").toString();
     QVariantMap payload = obj.value("payload").toObject().toVariantMap();
+
+    if (topic == QStringLiteral("client/hello")) {
+      handleClientHello(client, payload);
+      return;
+    }
+
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
+
     handlePublish(topic, payload);
   } else if (type == "service_command") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString command = obj.value("command").toString();
     QString commandError;
     if (!validateServiceCommand(command, commandError)) {
@@ -203,6 +248,8 @@ void WebSocketServer::onTextMessageReceived(const QString& message) {
     handleServiceCommand(client, command, params);
   } else if (type == "admin_api") {
     handleAdminApiRequest(client, obj);
+  } else if (type == "client_hello") {
+    handleClientHello(client, obj.value(QStringLiteral("payload")).toObject().toVariantMap());
   }
 }
 
@@ -213,8 +260,122 @@ void WebSocketServer::onClientDisconnected() {
         QString("Client disconnected: %1").arg(client->peerAddress().toString()));
     m_clients.removeOne(client);
     m_subscriptions.remove(client);
+    m_clientHelloReceived.remove(client);
+    m_clientVersion.remove(client);
+    m_clientKind.remove(client);
+    m_clientProtocolVersion.remove(client);
+    m_clientCapabilities.remove(client);
     client->deleteLater();
   }
+}
+
+bool WebSocketServer::isClientContractSatisfied(QWebSocket* client) const {
+  if (!client) {
+    return false;
+  }
+
+  if (!m_requireClientHello) {
+    return true;
+  }
+
+  return m_clientHelloReceived.value(client, false);
+}
+
+int WebSocketServer::parseVersionMajor(const QString& version) const {
+  static const QRegularExpression majorPattern(QStringLiteral("^(\\d+)"));
+  const QRegularExpressionMatch match = majorPattern.match(version.trimmed());
+  if (!match.hasMatch()) {
+    return -1;
+  }
+
+  bool ok = false;
+  const int major = match.captured(1).toInt(&ok);
+  return ok ? major : -1;
+}
+
+void WebSocketServer::handleClientHello(QWebSocket* client, const QVariantMap& payload) {
+  if (!client) {
+    return;
+  }
+
+  const QString clientKind = payload.value(QStringLiteral("client_kind")).toString().trimmed();
+  const QString clientVersion = payload.value(QStringLiteral("client_version")).toString().trimmed();
+  const int protocolVersion = payload.value(QStringLiteral("client_protocol_version")).toInt();
+  const QVariantList capabilitiesRaw = payload.value(QStringLiteral("capabilities")).toList();
+
+  QSet<QString> capabilities;
+  for (const QVariant& entry : capabilitiesRaw) {
+    const QString cap = entry.toString().trimmed();
+    if (!cap.isEmpty()) {
+      capabilities.insert(cap);
+    }
+  }
+
+  if (clientKind.isEmpty()) {
+    Logger::instance().warning("[WebSocketServer] Rejecting client hello: missing client_kind");
+    sendError(client, QStringLiteral("client_hello_missing_client_kind"));
+    if (m_requireClientHello) {
+      client->close();
+    }
+    return;
+  }
+
+  if (protocolVersion < m_requiredClientProtocolVersion) {
+    Logger::instance().warning(
+        QString("[WebSocketServer] Rejecting client hello: protocol mismatch kind=%1 version=%2 "
+                "protocol=%3 required=%4")
+            .arg(clientKind)
+            .arg(clientVersion)
+            .arg(protocolVersion)
+            .arg(m_requiredClientProtocolVersion));
+    sendError(client, QStringLiteral("client_hello_protocol_mismatch"));
+    if (m_requireClientHello) {
+      client->close();
+    }
+    return;
+  }
+
+  if (m_minClientVersionMajor > 0) {
+    const int majorVersion = parseVersionMajor(clientVersion);
+    if (majorVersion >= 0 && majorVersion < m_minClientVersionMajor) {
+      Logger::instance().warning(
+          QString("[WebSocketServer] Rejecting client hello: client major version too old "
+                  "kind=%1 version=%2 min_major=%3")
+              .arg(clientKind)
+              .arg(clientVersion)
+              .arg(m_minClientVersionMajor));
+      sendError(client, QStringLiteral("client_hello_version_too_old"));
+      if (m_requireClientHello) {
+        client->close();
+      }
+      return;
+    }
+  }
+
+  if (m_requireAndroidAutoCapability && !capabilities.contains(QStringLiteral("android_auto"))) {
+    Logger::instance().warning(
+        QString("[WebSocketServer] Rejecting client hello: required capability missing kind=%1")
+            .arg(clientKind));
+    sendError(client, QStringLiteral("client_hello_missing_required_capability"));
+    if (m_requireClientHello) {
+      client->close();
+    }
+    return;
+  }
+
+  m_clientHelloReceived[client] = true;
+  m_clientKind[client] = clientKind;
+  m_clientVersion[client] = clientVersion;
+  m_clientProtocolVersion[client] = protocolVersion;
+  m_clientCapabilities[client] = capabilities;
+
+  Logger::instance().info(
+      QString("[WebSocketServer] Client hello accepted: kind=%1 version=%2 protocol=%3 "
+              "capabilities=[%4]")
+          .arg(clientKind)
+          .arg(clientVersion)
+          .arg(protocolVersion)
+          .arg(QStringList(capabilities.values()).join(',')));
 }
 
 void WebSocketServer::handleSubscribe(QWebSocket* client, const QString& topic) {
@@ -688,6 +849,33 @@ void WebSocketServer::processAdminRoute(const QString& method, const QString& pa
     responseBody[QStringLiteral("websocket_secure_mode")] = m_secureModeEnabled;
     responseBody[QStringLiteral("android_auto_connected")] =
         m_serviceManager->getAndroidAutoService() && m_serviceManager->getAndroidAutoService()->isConnected();
+    responseBody[QStringLiteral("client_contract")] =
+        QJsonObject{{QStringLiteral("require_hello"), m_requireClientHello},
+                    {QStringLiteral("required_protocol_version"), m_requiredClientProtocolVersion},
+                    {QStringLiteral("min_client_major"), m_minClientVersionMajor},
+                    {QStringLiteral("require_android_auto_capability"),
+                     m_requireAndroidAutoCapability}};
+
+    QJsonArray connectedClients;
+    for (QWebSocket* client : m_clients) {
+      if (!client) {
+        continue;
+      }
+
+      connectedClients.append(
+          QJsonObject{{QStringLiteral("peer"), client->peerAddress().toString()},
+                      {QStringLiteral("hello_received"),
+                       m_clientHelloReceived.value(client, false)},
+                      {QStringLiteral("client_kind"),
+                       m_clientKind.value(client, QStringLiteral("unknown"))},
+                      {QStringLiteral("client_version"), m_clientVersion.value(client, QString())},
+                      {QStringLiteral("client_protocol_version"),
+                       m_clientProtocolVersion.value(client, 0)},
+                      {QStringLiteral("capabilities"),
+                       QJsonArray::fromStringList(
+                           QStringList(m_clientCapabilities.value(client, QSet<QString>()).values()))}});
+    }
+    responseBody[QStringLiteral("connected_clients")] = connectedClients;
     statusCode = 200;
     return;
   }
@@ -1180,7 +1368,8 @@ void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
 bool WebSocketServer::validateMessage(const QJsonObject& obj, QString& error) const {
   static const QSet<QString> allowedTypes = {
       QStringLiteral("subscribe"), QStringLiteral("unsubscribe"), QStringLiteral("publish"),
-      QStringLiteral("service_command"), QStringLiteral("admin_api")};
+  QStringLiteral("service_command"), QStringLiteral("admin_api"),
+  QStringLiteral("client_hello")};
 
   const QString type = obj.value("type").toString();
   if (type.isEmpty() || !allowedTypes.contains(type)) {
@@ -1198,6 +1387,13 @@ bool WebSocketServer::validateMessage(const QJsonObject& obj, QString& error) co
 
   if (type == "publish") {
     if (!obj.contains("payload") || !obj.value("payload").isObject()) {
+      error = QStringLiteral("invalid_payload");
+      return false;
+    }
+  }
+
+  if (type == "client_hello") {
+    if (!obj.contains(QStringLiteral("payload")) || !obj.value(QStringLiteral("payload")).isObject()) {
       error = QStringLiteral("invalid_payload");
       return false;
     }
