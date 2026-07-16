@@ -98,6 +98,12 @@ WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
       .get("core.android_auto.websocket.renegotiation_cooldown_ms", 8000)
       .toInt(),
     60000);
+    m_connectedRenegotiationGraceMs = qBound(
+      2000,
+      ConfigService::instance()
+        .get("core.android_auto.websocket.renegotiation_connected_grace_ms", 20000)
+        .toInt(),
+      180000);
 
   if (m_server->listen(QHostAddress::Any, port)) {
     Logger::instance().info(QString("WebSocket server listening on port %1 (ws://)").arg(port));
@@ -275,6 +281,38 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
       } else if (topic == QStringLiteral("android-auto/renegotiate") ||
                  topic == QStringLiteral("android-auto/reconnect")) {
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const auto state = aaService->getConnectionState();
+
+        const bool projectionReady =
+          m_lastProjectionStatus.value(QStringLiteral("projection_ready")).toBool(false);
+        const bool controlVersionReceived =
+          m_lastProjectionStatus.value(QStringLiteral("control_version_received")).toBool(false);
+        const bool serviceDiscoveryCompleted =
+          m_lastProjectionStatus.value(QStringLiteral("service_discovery_completed")).toBool(false);
+
+        if (state == AndroidAutoService::ConnectionState::CONNECTED) {
+          const qint64 connectedAgeMs =
+            m_lastConnectedStateMs > 0 ? (nowMs - m_lastConnectedStateMs) : LLONG_MAX;
+          const bool hasBringupProgress =
+            projectionReady || controlVersionReceived || serviceDiscoveryCompleted;
+
+          if (connectedAgeMs >= 0 && connectedAgeMs < m_connectedRenegotiationGraceMs &&
+            hasBringupProgress) {
+          Logger::instance().warning(
+            QString("[WebSocketServer] Suppressed Android Auto renegotiation "
+                "(connected warm-up grace active, age=%1 ms, grace=%2 ms, "
+                "projection_ready=%3, control_version_received=%4, "
+                "service_discovery_completed=%5, topic=%6)")
+              .arg(connectedAgeMs)
+              .arg(m_connectedRenegotiationGraceMs)
+              .arg(projectionReady ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(controlVersionReceived ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(serviceDiscoveryCompleted ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(topic));
+          return;
+          }
+        }
+
         const qint64 elapsedSinceLastMs =
           m_lastRenegotiationRequestMs > 0 ? (nowMs - m_lastRenegotiationRequestMs) : LLONG_MAX;
         if (m_lastRenegotiationRequestMs > 0 &&
@@ -952,6 +990,14 @@ void WebSocketServer::setupAndroidAutoConnections() {
 
 void WebSocketServer::onAndroidAutoStateChanged(int state) {
   Logger::instance().info(QString("[WebSocketServer] Android Auto state changed: %1").arg(state));
+
+  if (state == static_cast<int>(AndroidAutoService::ConnectionState::CONNECTED)) {
+    m_lastConnectedStateMs = QDateTime::currentMSecsSinceEpoch();
+  } else if (state == static_cast<int>(AndroidAutoService::ConnectionState::DISCONNECTED) ||
+             state == static_cast<int>(AndroidAutoService::ConnectionState::ERROR)) {
+    m_lastConnectedStateMs = 0;
+  }
+
   QVariantMap payload;
   payload["state"] = state;
 
