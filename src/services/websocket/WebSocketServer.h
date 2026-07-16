@@ -252,6 +252,13 @@ class WebSocketServer : public QObject {
    */
   [[nodiscard]] auto isSecureModeEnabled() const -> bool;
 
+  [[nodiscard]] static auto isClientContractSatisfied(bool requireClientHello,
+                                                      bool clientHelloReceived) -> bool;
+  [[nodiscard]] static auto evaluateClientHello(const ClientHelloPayload& payload,
+                                                const ClientHelloContractConfig& config)
+      -> ClientHelloDecision;
+  [[nodiscard]] static auto clientHelloDecisionError(ClientHelloDecision decision) -> QString;
+
   /**
    * @brief Inject service manager for event relay
    * @param serviceManager Pointer to application ServiceManager
@@ -337,13 +344,6 @@ class WebSocketServer : public QObject {
   void sendAdminApiResponse(QWebSocket* client, const QString& requestId, bool ok, int statusCode,
                             const QString& path, const QJsonObject& body,
                             const QString& error = QString()) const;
-
-  [[nodiscard]] static auto isClientContractSatisfied(bool requireClientHello,
-                                                      bool clientHelloReceived) -> bool;
-  [[nodiscard]] static auto evaluateClientHello(const ClientHelloPayload& payload,
-                                                const ClientHelloContractConfig& config)
-      -> ClientHelloDecision;
-  [[nodiscard]] static auto clientHelloDecisionError(ClientHelloDecision decision) -> QString;
 
   [[nodiscard]] auto isClientContractSatisfied(QWebSocket* client) const -> bool;
   void handleClientHello(QWebSocket* client, const QVariantMap& payload);
