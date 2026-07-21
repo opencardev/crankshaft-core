@@ -113,6 +113,22 @@ void ProfileManager::initializeDefaultProfiles() {
   androidAutoDevice.settings["logging.enabled"] = true;
   androidAutoDevice.settings["logging.level"] = "info";
   androidAutoDevice.settings["logging.verbose_usb"] = false;
+  androidAutoDevice.settings["decode.soft_cap_frames"] = 3;
+  androidAutoDevice.settings["decode.hard_cap_frames"] = 6;
+  androidAutoDevice.settings["decode.hysteresis_floor_frames"] = 2;
+  androidAutoDevice.settings["decode.dynamic_target_enabled"] = true;
+  androidAutoDevice.settings["telemetry.enabled"] = true;
+  androidAutoDevice.settings["telemetry.local_only"] = true;
+  androidAutoDevice.settings["telemetry.retention_budget_mb"] = 100;
+  androidAutoDevice.settings["telemetry.trace_buffer_mb"] = 70;
+  androidAutoDevice.settings["telemetry.metrics_buffer_mb"] = 20;
+  androidAutoDevice.settings["telemetry.emergency_snapshot_mb"] = 10;
+  androidAutoDevice.settings["telemetry.burst_on_hard_cap_breach"] = true;
+  androidAutoDevice.settings["telemetry.burst_duration_seconds"] = 10;
+  androidAutoDevice.settings["telemetry.pretrigger_rewind_seconds"] = 2;
+  androidAutoDevice.settings["telemetry.burst_cooldown_seconds"] = 30;
+  androidAutoDevice.settings["thermal.level2_trigger_temp_c"] = 75;
+  androidAutoDevice.settings["thermal.level2_clear_temp_c"] = 72;
 
   devHostProfile.devices.append(androidAutoDevice);
 
