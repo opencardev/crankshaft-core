@@ -213,6 +213,40 @@ class RealAndroidAutoService : public AndroidAutoService {
     bool bluetoothEnabled{false};
   };
 
+  struct DecodeControlConfig {
+    bool enabled{true};
+    bool dynamicTargetEnabled{true};
+    int targetDepthNominalFrames{2};
+    int targetDepthMinFrames{1};
+    int targetDepthMaxFrames{4};
+    int softCapFrames{3};
+    int hardCapFrames{6};
+    int hysteresisFloorFrames{2};
+    bool admissionControlEnabled{true};
+    int admissionThrottleStepPct{10};
+    int admissionThrottleMaxPct{70};
+    int queueSamplePeriodMs{33};
+  };
+
+  struct TelemetryConfig {
+    bool enabled{true};
+    bool localOnly{true};
+    int retentionBudgetMb{100};
+    int traceBufferMb{70};
+    int metricsBufferMb{20};
+    int emergencySnapshotMb{10};
+    bool burstOnHardCapBreach{true};
+    int burstDurationSeconds{10};
+    int pretriggerRewindSeconds{2};
+    int burstCooldownSeconds{30};
+  };
+
+  struct ThermalControlConfig {
+    int level2TriggerTempC{75};
+    int level2ClearTempC{72};
+    bool emergencyDecodeThrottleEnabled{true};
+  };
+
   void setChannelConfig(const ChannelConfig& config);
   ChannelConfig getChannelConfig() const {
     return m_channelConfig;
@@ -321,6 +355,9 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_videoHeightMargin{0};
   bool m_audioEnabled{true};
   ChannelConfig m_channelConfig;
+  DecodeControlConfig m_decodeControlConfig;
+  TelemetryConfig m_telemetryConfig;
+  ThermalControlConfig m_thermalControlConfig;
   VideoTransportMode m_requestedVideoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
   VideoTransportMode m_videoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
   QString m_videoTransportFallbackReason;
@@ -350,6 +387,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   quint64 m_videoDecodeSubmitCount{0};
   quint64 m_videoDecodeRejectCount{0};
   quint64 m_videoDecodedFrameCount{0};
+  int m_videoDecodeBacklogEstimate{0};
+  quint64 m_decodeHardCapBreachCount{0};
+  quint64 m_decodeSoftCapHitCount{0};
+  qint64 m_lastDecodeHardCapBreachMs{0};
+  qint64 m_lastTelemetryBurstCaptureMs{0};
   quint64 m_mediaAudioUpdateCount{0};
   quint64 m_mediaAudioPayloadCount{0};
   quint64 m_mediaAudioMixCount{0};

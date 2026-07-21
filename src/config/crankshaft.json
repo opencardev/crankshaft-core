@@ -52,6 +52,38 @@
         "width_margin": 0,
         "height_margin": 0
       },
+      "decode": {
+        "enabled": true,
+        "dynamic_target_enabled": true,
+        "target_depth_nominal_frames": 2,
+        "target_depth_min_frames": 1,
+        "target_depth_max_frames": 4,
+        "soft_cap_frames": 3,
+        "hard_cap_frames": 6,
+        "hysteresis_floor_frames": 2,
+        "admission_control_enabled": true,
+        "admission_throttle_step_pct": 10,
+        "admission_throttle_max_pct": 70,
+        "queue_sample_period_ms": 33
+      },
+      "telemetry": {
+        "enabled": true,
+        "local_only": true,
+        "retention_budget_mb": 100,
+        "trace_buffer_mb": 70,
+        "metrics_buffer_mb": 20,
+        "emergency_snapshot_mb": 10,
+        "burst_on_hard_cap_breach": true,
+        "burst_duration_seconds": 10,
+        "pretrigger_rewind_seconds": 2,
+        "burst_cooldown_seconds": 30,
+        "export_mode": "debug_collector_pull"
+      },
+      "thermal": {
+        "level2_trigger_temp_c": 75,
+        "level2_clear_temp_c": 72,
+        "emergency_decode_throttle_enabled": true
+      },
       "control": {
         "version_request_max_attempts": 10,
         "version_request_recovery_ms": 120000,

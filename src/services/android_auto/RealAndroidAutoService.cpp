@@ -563,6 +563,188 @@ static auto resolveSettingBool(const QMap<QString, QVariant>& settings,
   return defaultValue;
 }
 
+  static auto resolveDecodeControlConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::DecodeControlConfig {
+    RealAndroidAutoService::DecodeControlConfig cfg;
+
+    cfg.enabled = resolveSettingBool(
+      settings, "decode.enabled", "core.services.android_auto.decode.enabled",
+      "core.android_auto.decode.enabled", cfg.enabled);
+    cfg.dynamicTargetEnabled =
+      resolveSettingBool(settings, "decode.dynamic_target_enabled",
+               "core.services.android_auto.decode.dynamic_target_enabled",
+               "core.android_auto.decode.dynamic_target_enabled", cfg.dynamicTargetEnabled);
+
+    cfg.targetDepthNominalFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_nominal_frames",
+                   "core.services.android_auto.decode.target_depth_nominal_frames",
+                   "core.android_auto.decode.target_depth_nominal_frames",
+                   cfg.targetDepthNominalFrames, 1, 8);
+    cfg.targetDepthMinFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_min_frames",
+                   "core.services.android_auto.decode.target_depth_min_frames",
+                   "core.android_auto.decode.target_depth_min_frames",
+                   cfg.targetDepthMinFrames, 1, 8);
+    cfg.targetDepthMaxFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_max_frames",
+                   "core.services.android_auto.decode.target_depth_max_frames",
+                   "core.android_auto.decode.target_depth_max_frames",
+                   cfg.targetDepthMaxFrames, 1, 12);
+    cfg.softCapFrames =
+      resolveBoundedIntSetting(settings, "decode.soft_cap_frames",
+                   "core.services.android_auto.decode.soft_cap_frames",
+                   "core.android_auto.decode.soft_cap_frames", cfg.softCapFrames, 1, 12);
+    cfg.hardCapFrames =
+      resolveBoundedIntSetting(settings, "decode.hard_cap_frames",
+                   "core.services.android_auto.decode.hard_cap_frames",
+                   "core.android_auto.decode.hard_cap_frames", cfg.hardCapFrames, 1, 12);
+    cfg.hysteresisFloorFrames =
+      resolveBoundedIntSetting(settings, "decode.hysteresis_floor_frames",
+                   "core.services.android_auto.decode.hysteresis_floor_frames",
+                   "core.android_auto.decode.hysteresis_floor_frames",
+                   cfg.hysteresisFloorFrames, 0, 10);
+    cfg.admissionControlEnabled =
+      resolveSettingBool(settings, "decode.admission_control_enabled",
+               "core.services.android_auto.decode.admission_control_enabled",
+               "core.android_auto.decode.admission_control_enabled",
+               cfg.admissionControlEnabled);
+    cfg.admissionThrottleStepPct =
+      resolveBoundedIntSetting(settings, "decode.admission_throttle_step_pct",
+                   "core.services.android_auto.decode.admission_throttle_step_pct",
+                   "core.android_auto.decode.admission_throttle_step_pct",
+                   cfg.admissionThrottleStepPct, 1, 90);
+    cfg.admissionThrottleMaxPct =
+      resolveBoundedIntSetting(settings, "decode.admission_throttle_max_pct",
+                   "core.services.android_auto.decode.admission_throttle_max_pct",
+                   "core.android_auto.decode.admission_throttle_max_pct",
+                   cfg.admissionThrottleMaxPct, 1, 95);
+    cfg.queueSamplePeriodMs =
+      resolveBoundedIntSetting(settings, "decode.queue_sample_period_ms",
+                   "core.services.android_auto.decode.queue_sample_period_ms",
+                   "core.android_auto.decode.queue_sample_period_ms",
+                   cfg.queueSamplePeriodMs, 10, 1000);
+
+    if (cfg.softCapFrames >= cfg.hardCapFrames) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] decode caps invalid (soft=%1 hard=%2), forcing hard=soft+1")
+        .arg(cfg.softCapFrames)
+        .arg(cfg.hardCapFrames));
+    cfg.hardCapFrames = std::min(12, cfg.softCapFrames + 1);
+    }
+
+    if (cfg.hysteresisFloorFrames >= cfg.softCapFrames) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] decode hysteresis invalid (floor=%1 soft=%2), forcing floor=soft-1")
+        .arg(cfg.hysteresisFloorFrames)
+        .arg(cfg.softCapFrames));
+    cfg.hysteresisFloorFrames = std::max(0, cfg.softCapFrames - 1);
+    }
+
+    if (cfg.targetDepthMinFrames > cfg.targetDepthMaxFrames) {
+    std::swap(cfg.targetDepthMinFrames, cfg.targetDepthMaxFrames);
+    }
+    cfg.targetDepthNominalFrames =
+      std::clamp(cfg.targetDepthNominalFrames, cfg.targetDepthMinFrames, cfg.targetDepthMaxFrames);
+
+    if (cfg.admissionThrottleStepPct > cfg.admissionThrottleMaxPct) {
+    cfg.admissionThrottleStepPct = cfg.admissionThrottleMaxPct;
+    }
+
+    return cfg;
+  }
+
+  static auto resolveTelemetryConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::TelemetryConfig {
+    RealAndroidAutoService::TelemetryConfig cfg;
+
+    cfg.enabled = resolveSettingBool(
+      settings, "telemetry.enabled", "core.services.android_auto.telemetry.enabled",
+      "core.android_auto.telemetry.enabled", cfg.enabled);
+    cfg.localOnly = resolveSettingBool(
+      settings, "telemetry.local_only", "core.services.android_auto.telemetry.local_only",
+      "core.android_auto.telemetry.local_only", cfg.localOnly);
+    cfg.retentionBudgetMb =
+      resolveBoundedIntSetting(settings, "telemetry.retention_budget_mb",
+                   "core.services.android_auto.telemetry.retention_budget_mb",
+                   "core.android_auto.telemetry.retention_budget_mb",
+                   cfg.retentionBudgetMb, 10, 1024);
+    cfg.traceBufferMb =
+      resolveBoundedIntSetting(settings, "telemetry.trace_buffer_mb",
+                   "core.services.android_auto.telemetry.trace_buffer_mb",
+                   "core.android_auto.telemetry.trace_buffer_mb", cfg.traceBufferMb,
+                   1, 1024);
+    cfg.metricsBufferMb =
+      resolveBoundedIntSetting(settings, "telemetry.metrics_buffer_mb",
+                   "core.services.android_auto.telemetry.metrics_buffer_mb",
+                   "core.android_auto.telemetry.metrics_buffer_mb",
+                   cfg.metricsBufferMb, 1, 1024);
+    cfg.emergencySnapshotMb =
+      resolveBoundedIntSetting(settings, "telemetry.emergency_snapshot_mb",
+                   "core.services.android_auto.telemetry.emergency_snapshot_mb",
+                   "core.android_auto.telemetry.emergency_snapshot_mb",
+                   cfg.emergencySnapshotMb, 1, 1024);
+    cfg.burstOnHardCapBreach =
+      resolveSettingBool(settings, "telemetry.burst_on_hard_cap_breach",
+               "core.services.android_auto.telemetry.burst_on_hard_cap_breach",
+               "core.android_auto.telemetry.burst_on_hard_cap_breach",
+               cfg.burstOnHardCapBreach);
+    cfg.burstDurationSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.burst_duration_seconds",
+                   "core.services.android_auto.telemetry.burst_duration_seconds",
+                   "core.android_auto.telemetry.burst_duration_seconds",
+                   cfg.burstDurationSeconds, 1, 300);
+    cfg.pretriggerRewindSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.pretrigger_rewind_seconds",
+                   "core.services.android_auto.telemetry.pretrigger_rewind_seconds",
+                   "core.android_auto.telemetry.pretrigger_rewind_seconds",
+                   cfg.pretriggerRewindSeconds, 0, 60);
+    cfg.burstCooldownSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.burst_cooldown_seconds",
+                   "core.services.android_auto.telemetry.burst_cooldown_seconds",
+                   "core.android_auto.telemetry.burst_cooldown_seconds",
+                   cfg.burstCooldownSeconds, 1, 3600);
+
+    const int partitionTotal = cfg.traceBufferMb + cfg.metricsBufferMb + cfg.emergencySnapshotMb;
+    if (partitionTotal != cfg.retentionBudgetMb) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] telemetry partition total (%1MB) != retention budget (%2MB)")
+        .arg(partitionTotal)
+        .arg(cfg.retentionBudgetMb));
+    }
+
+    return cfg;
+  }
+
+  static auto resolveThermalControlConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::ThermalControlConfig {
+    RealAndroidAutoService::ThermalControlConfig cfg;
+
+    cfg.level2TriggerTempC =
+      resolveBoundedIntSetting(settings, "thermal.level2_trigger_temp_c",
+                   "core.services.android_auto.thermal.level2_trigger_temp_c",
+                   "core.android_auto.thermal.level2_trigger_temp_c",
+                   cfg.level2TriggerTempC, 45, 95);
+    cfg.level2ClearTempC =
+      resolveBoundedIntSetting(settings, "thermal.level2_clear_temp_c",
+                   "core.services.android_auto.thermal.level2_clear_temp_c",
+                   "core.android_auto.thermal.level2_clear_temp_c", cfg.level2ClearTempC,
+                   40, 90);
+    cfg.emergencyDecodeThrottleEnabled =
+      resolveSettingBool(settings, "thermal.emergency_decode_throttle_enabled",
+               "core.services.android_auto.thermal.emergency_decode_throttle_enabled",
+               "core.android_auto.thermal.emergency_decode_throttle_enabled",
+               cfg.emergencyDecodeThrottleEnabled);
+
+    if (cfg.level2ClearTempC >= cfg.level2TriggerTempC) {
+    cfg.level2ClearTempC = std::max(40, cfg.level2TriggerTempC - 3);
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] thermal clear threshold adjusted below trigger (%1C)")
+        .arg(cfg.level2ClearTempC));
+    }
+
+    return cfg;
+  }
+
 static void applyAndroidAutoLoggingConfig(const QMap<QString, QVariant>& settings) {
   const bool loggingEnabled =
       resolveSettingBool(settings, "logging.enabled", "core.services.android_auto.logging.enabled",
@@ -2768,6 +2950,9 @@ void RealAndroidAutoService::setWirelessNetworkManager(
 void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& settings) {
   applyAndroidAutoLoggingConfig(settings);
   setChannelConfig(resolveAndroidAutoChannelConfig(settings, m_channelConfig));
+  m_decodeControlConfig = resolveDecodeControlConfig(settings);
+  m_telemetryConfig = resolveTelemetryConfig(settings);
+  m_thermalControlConfig = resolveThermalControlConfig(settings);
 
   const AAVideoAdvertisementConfig videoConfig = resolveVideoAdvertisementConfig(settings);
   m_resolution = videoConfig.resolution;
@@ -2817,6 +3002,42 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
 
   Logger::instance().info(QString("[RealAndroidAutoService] Resolved startup profile: %1")
                               .arg(aaStartupProfileToString(resolveAAStartupProfile())));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Decode control config: enabled=%1 dynamic=%2 target=%3[%4..%5] caps=%6/%7 hysteresis=%8 throttle_step=%9%% throttle_max=%10%% sample_ms=%11")
+        .arg(m_decodeControlConfig.enabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_decodeControlConfig.dynamicTargetEnabled ? QStringLiteral("true")
+                                : QStringLiteral("false"))
+        .arg(m_decodeControlConfig.targetDepthNominalFrames)
+        .arg(m_decodeControlConfig.targetDepthMinFrames)
+        .arg(m_decodeControlConfig.targetDepthMaxFrames)
+        .arg(m_decodeControlConfig.softCapFrames)
+        .arg(m_decodeControlConfig.hardCapFrames)
+        .arg(m_decodeControlConfig.hysteresisFloorFrames)
+        .arg(m_decodeControlConfig.admissionThrottleStepPct)
+        .arg(m_decodeControlConfig.admissionThrottleMaxPct)
+        .arg(m_decodeControlConfig.queueSamplePeriodMs));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Telemetry config: enabled=%1 local_only=%2 retention_mb=%3 partition(trace=%4,metrics=%5,snapshot=%6) burst=%7 duration_s=%8 pretrigger_s=%9 cooldown_s=%10")
+        .arg(m_telemetryConfig.enabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_telemetryConfig.localOnly ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_telemetryConfig.retentionBudgetMb)
+        .arg(m_telemetryConfig.traceBufferMb)
+        .arg(m_telemetryConfig.metricsBufferMb)
+        .arg(m_telemetryConfig.emergencySnapshotMb)
+        .arg(m_telemetryConfig.burstOnHardCapBreach ? QStringLiteral("true")
+                              : QStringLiteral("false"))
+        .arg(m_telemetryConfig.burstDurationSeconds)
+        .arg(m_telemetryConfig.pretriggerRewindSeconds)
+        .arg(m_telemetryConfig.burstCooldownSeconds));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Thermal control config: trigger_c=%1 clear_c=%2 emergency_throttle=%3")
+        .arg(m_thermalControlConfig.level2TriggerTempC)
+        .arg(m_thermalControlConfig.level2ClearTempC)
+        .arg(m_thermalControlConfig.emergencyDecodeThrottleEnabled ? QStringLiteral("true")
+                                     : QStringLiteral("false")));
 
   QString mode = settings.value("connectionMode", "auto").toString().toLower();
   Logger::instance().info(
@@ -3234,7 +3455,9 @@ void RealAndroidAutoService::setupChannels() {
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
           [this](int width, int height, const QByteArray& frameData) {
-                  m_videoDecodedFrameCount++;
+                    m_videoDecodedFrameCount++;
+                    m_videoDecodeBacklogEstimate =
+                      std::max(0, m_videoDecodeBacklogEstimate - 1);
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
                     aaLogDebug(
@@ -3479,7 +3702,9 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
           [this](int width, int height, const QByteArray& frameData) {
-                  m_videoDecodedFrameCount++;
+                    m_videoDecodedFrameCount++;
+                    m_videoDecodeBacklogEstimate =
+                      std::max(0, m_videoDecodeBacklogEstimate - 1);
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
                     aaLogDebug(
@@ -6614,6 +6839,35 @@ void RealAndroidAutoService::publishProjectionStatus(const QString& reason) {
   status[QStringLiteral("sensor_enabled")] = m_channelConfig.sensorEnabled;
   status[QStringLiteral("microphone_enabled")] = m_channelConfig.microphoneEnabled;
   status[QStringLiteral("projection_ready")] = projectionReady;
+    status[QStringLiteral("decode_control_enabled")] = m_decodeControlConfig.enabled;
+    status[QStringLiteral("decode_dynamic_target_enabled")] =
+      m_decodeControlConfig.dynamicTargetEnabled;
+    status[QStringLiteral("decode_target_depth_nominal_frames")] =
+      m_decodeControlConfig.targetDepthNominalFrames;
+    status[QStringLiteral("decode_target_depth_min_frames")] =
+      m_decodeControlConfig.targetDepthMinFrames;
+    status[QStringLiteral("decode_target_depth_max_frames")] =
+      m_decodeControlConfig.targetDepthMaxFrames;
+    status[QStringLiteral("decode_soft_cap_frames")] = m_decodeControlConfig.softCapFrames;
+    status[QStringLiteral("decode_hard_cap_frames")] = m_decodeControlConfig.hardCapFrames;
+    status[QStringLiteral("decode_hysteresis_floor_frames")] =
+      m_decodeControlConfig.hysteresisFloorFrames;
+    status[QStringLiteral("decode_backlog_estimate_frames")] = m_videoDecodeBacklogEstimate;
+    status[QStringLiteral("decode_soft_cap_hit_count")] =
+      static_cast<qint64>(m_decodeSoftCapHitCount);
+    status[QStringLiteral("decode_hard_cap_breach_count")] =
+      static_cast<qint64>(m_decodeHardCapBreachCount);
+    status[QStringLiteral("telemetry_enabled")] = m_telemetryConfig.enabled;
+    status[QStringLiteral("telemetry_local_only")] = m_telemetryConfig.localOnly;
+    status[QStringLiteral("telemetry_retention_budget_mb")] = m_telemetryConfig.retentionBudgetMb;
+    status[QStringLiteral("telemetry_burst_on_hard_cap_breach")] =
+      m_telemetryConfig.burstOnHardCapBreach;
+    status[QStringLiteral("telemetry_burst_cooldown_seconds")] =
+      m_telemetryConfig.burstCooldownSeconds;
+    status[QStringLiteral("thermal_level2_trigger_temp_c")] =
+      m_thermalControlConfig.level2TriggerTempC;
+    status[QStringLiteral("thermal_level2_clear_temp_c")] =
+      m_thermalControlConfig.level2ClearTempC;
   status[QStringLiteral("timestamp")] = QDateTime::currentSecsSinceEpoch();
 
   if (projectionReady != m_lastProjectionReady) {
@@ -6654,6 +6908,11 @@ void RealAndroidAutoService::resetProjectionStatus(const QString& reason) {
   m_controlHandshakeActivationRetryCount = 0;
   m_videoTransportFallbackReason.clear();
   m_lastProjectionReady = false;
+  m_videoDecodeBacklogEstimate = 0;
+  m_decodeSoftCapHitCount = 0;
+  m_decodeHardCapBreachCount = 0;
+  m_lastDecodeHardCapBreachMs = 0;
+  m_lastTelemetryBurstCaptureMs = 0;
   m_channelReceiveArmTraceKeys.clear();
   publishProjectionStatus(reason);
 }
@@ -6902,6 +7161,36 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
     // Convert aasdk::common::Data to QByteArray
     QByteArray frameData(reinterpret_cast<const char*>(h264Data.data()), h264Data.size());
     m_videoDecodeSubmitCount++;
+    m_videoDecodeBacklogEstimate =
+        std::max(0, static_cast<int>(m_videoDecodeSubmitCount - m_videoDecodedFrameCount -
+                                     m_videoDecodeRejectCount));
+
+    if (m_decodeControlConfig.enabled &&
+        m_videoDecodeBacklogEstimate >= m_decodeControlConfig.softCapFrames) {
+      m_decodeSoftCapHitCount++;
+    }
+
+    if (m_decodeControlConfig.enabled &&
+        m_videoDecodeBacklogEstimate >= m_decodeControlConfig.hardCapFrames) {
+      m_decodeHardCapBreachCount++;
+      m_lastDecodeHardCapBreachMs = QDateTime::currentMSecsSinceEpoch();
+
+      if (m_telemetryConfig.enabled && m_telemetryConfig.burstOnHardCapBreach) {
+        const qint64 cooldownMs = static_cast<qint64>(m_telemetryConfig.burstCooldownSeconds) * 1000;
+        if (m_lastTelemetryBurstCaptureMs == 0 ||
+            (m_lastDecodeHardCapBreachMs - m_lastTelemetryBurstCaptureMs) >= cooldownMs) {
+          m_lastTelemetryBurstCaptureMs = m_lastDecodeHardCapBreachMs;
+          aaLogWarning(
+              "decodeLoop",
+              QString("hard-cap breach backlog=%1 hard_cap=%2 soft_cap=%3 breaches=%4 (telemetry burst marker)")
+                  .arg(m_videoDecodeBacklogEstimate)
+                  .arg(m_decodeControlConfig.hardCapFrames)
+                  .arg(m_decodeControlConfig.softCapFrames)
+                  .arg(m_decodeHardCapBreachCount));
+        }
+      }
+    }
+
     if (!m_videoDecoder->decodeFrame(frameData)) {
       Logger::instance().warning("Failed to decode video frame");
       aaLogWarning("videoDecoder",
@@ -6911,6 +7200,9 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
                        .arg(m_videoDecodeRejectCount + 1));
       m_videoDecodeRejectCount++;
       m_droppedFrames++;
+      m_videoDecodeBacklogEstimate =
+          std::max(0, static_cast<int>(m_videoDecodeSubmitCount - m_videoDecodedFrameCount -
+                                       m_videoDecodeRejectCount));
     }
   } else {
     Logger::instance().warning(
