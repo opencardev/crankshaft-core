@@ -381,6 +381,8 @@ class WebSocketServer : public QObject {
   BluetoothManager* m_cachedBluetoothManager{nullptr};
   int m_videoFrameIntervalMs{66};
   quint64 m_videoFrameSequence{0};
+  QByteArray m_h264ParameterSets;
+  bool m_loggedH264ParameterSetReplay{false};
   quint64 m_audioChunkSequence{0};
   QJsonObject m_lastProjectionStatus;
   bool m_hasProjectionStatus{false};

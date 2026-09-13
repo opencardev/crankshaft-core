@@ -2985,7 +2985,7 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
                                                   : QStringLiteral("webrtc"));
 
   m_requestedVideoTransportMode =
-      AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+        AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
   m_videoTransportMode = m_requestedVideoTransportMode;
   m_videoTransportFallbackReason.clear();
 
@@ -3441,7 +3441,8 @@ void RealAndroidAutoService::setupChannels() {
     }
 
     // Initialize video decoder
-    if (m_channelConfig.videoEnabled) {
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
       m_videoDecoder = std::make_unique<GStreamerVideoDecoder>(this);
 
       IVideoDecoder::DecoderConfig decoderConfig;
@@ -3679,7 +3680,8 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
     // caused the GStreamer pipeline to initialise at 1024x600 while the phone
     // streams at 1920x1080, triggering a caps renegotiation on the first IDR
     // frame that produced visible HDMI flicker.
-    if (m_channelConfig.videoEnabled) {
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
       const QSize streamRes = negotiatedVideoResolution();
       m_negotiatedVideoResolution = streamRes;
       aaLogInfo("setupChannelsWithTransport",
@@ -7150,6 +7152,13 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
   }
 
   m_videoPayloadCount++;
+
+  // For the H.264 WebSocket transport the UI owns decoding. Forward the
+  // original encoded payload and avoid the core-side H.264 -> RGBA conversion.
+  if (m_videoTransportMode == VideoTransportMode::WEBSOCKET_H264) {
+    emit videoEncodedFrameReady(width, height, data);
+    return;
+  }
 
   // H.264 video data from Android device
   if (m_videoDecoder && m_videoDecoder->isReady()) {

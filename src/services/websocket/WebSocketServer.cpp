@@ -79,11 +79,53 @@ static auto videoTransportModeToString(AndroidAutoService::VideoTransportMode mo
   switch (mode) {
     case AndroidAutoService::VideoTransportMode::WEBSOCKET_JPEG:
       return QStringLiteral("websocket-jpeg");
+    case AndroidAutoService::VideoTransportMode::WEBSOCKET_H264:
+      return QStringLiteral("websocket-h264");
     case AndroidAutoService::VideoTransportMode::WEBRTC:
       return QStringLiteral("webrtc");
   }
 
   return QStringLiteral("unknown");
+}
+
+static auto extractH264ParameterSets(const QByteArray& frameData) -> QByteArray {
+  struct NaluStart {
+    int start{0};
+    int payload{0};
+  };
+
+  QList<NaluStart> nalus;
+  for (int index = 0; index + 3 < frameData.size(); ++index) {
+    if (frameData.at(index) != '\0' || frameData.at(index + 1) != '\0') {
+      continue;
+    }
+
+    if (frameData.at(index + 2) == '\x01') {
+      nalus.append({index, index + 3});
+    } else if (index + 4 < frameData.size() && frameData.at(index + 2) == '\0' &&
+               frameData.at(index + 3) == '\x01') {
+      nalus.append({index, index + 4});
+      ++index;
+    }
+  }
+
+  QByteArray parameterSets;
+  for (int index = 0; index < nalus.size(); ++index) {
+    const NaluStart& nalu = nalus.at(index);
+    if (nalu.payload >= frameData.size()) {
+      continue;
+    }
+
+    const int type = static_cast<unsigned char>(frameData.at(nalu.payload)) & 0x1F;
+    if (type != 7 && type != 8) {
+      continue;
+    }
+
+    const int end = index + 1 < nalus.size() ? nalus.at(index + 1).start : frameData.size();
+    parameterSets.append(frameData.constData() + nalu.start, end - nalu.start);
+  }
+
+  return parameterSets;
 }
 
 WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
@@ -1182,6 +1224,47 @@ void WebSocketServer::setupAndroidAutoConnections() {
           &WebSocketServer::onAndroidAutoError);
   connect(aaService, &AndroidAutoService::videoFrameReady, this,
           &WebSocketServer::onAndroidAutoVideoFrameReady);
+  connect(aaService, &AndroidAutoService::videoEncodedFrameReady, this,
+          [this](int width, int height, const QByteArray& frameData) {
+            if (frameData.isEmpty()) {
+              return;
+            }
+
+            const QByteArray parameterSets = extractH264ParameterSets(frameData);
+            if (!parameterSets.isEmpty()) {
+              m_h264ParameterSets = parameterSets;
+            }
+
+            if (!hasAnySubscriberForTopic(QStringLiteral("android-auto/media/video-frame"))) {
+              return;
+            }
+            if (!m_videoFrameTimer.isValid()) {
+              m_videoFrameTimer.start();
+            }
+            const qint64 nowMs = m_videoFrameTimer.elapsed();
+            if ((nowMs - m_lastVideoFrameBroadcastMs) < m_videoFrameIntervalMs) {
+              return;
+            }
+            m_lastVideoFrameBroadcastMs = nowMs;
+
+            QByteArray broadcastFrame = frameData;
+            if (parameterSets.isEmpty() && !m_h264ParameterSets.isEmpty()) {
+              broadcastFrame.prepend(m_h264ParameterSets);
+              if (!m_loggedH264ParameterSetReplay) {
+                m_loggedH264ParameterSetReplay = true;
+                Logger::instance().info(
+                    "[WebSocketServer] Replaying cached H.264 SPS/PPS before late slice frame");
+              }
+            }
+
+            QVariantMap payload;
+            payload["width"] = width;
+            payload["height"] = height;
+            payload["encoding"] = "h264-base64";
+            payload["sequence"] = static_cast<qulonglong>(++m_videoFrameSequence);
+            payload["data"] = QString::fromLatin1(broadcastFrame.toBase64());
+            broadcastEvent("android-auto/media/video-frame", payload);
+          });
   connect(aaService, &AndroidAutoService::audioDataReady, this,
           &WebSocketServer::onAndroidAutoAudioDataReady);
   connect(aaService, &AndroidAutoService::projectionStatusChanged, this,
@@ -1235,6 +1318,8 @@ void WebSocketServer::onAndroidAutoDeviceFound(const QVariantMap& device) {
 }
 
 void WebSocketServer::onAndroidAutoDisconnected() {
+  m_h264ParameterSets.clear();
+  m_loggedH264ParameterSetReplay = false;
   QVariantMap payload;
   payload["connected"] = false;
   broadcastEvent("android-auto/status/disconnected", payload);
