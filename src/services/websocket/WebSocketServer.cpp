@@ -1247,6 +1247,15 @@ void WebSocketServer::setupAndroidAutoConnections() {
             }
             m_lastVideoFrameBroadcastMs = nowMs;
 
+            ++m_h264BroadcastCount;
+            if (m_h264BroadcastCount == 1 || (m_h264BroadcastCount % 30) == 0) {
+              Logger::instance().info(
+                  QString("[WebSocketServer] H.264 broadcast: count=%1 sourceBytes=%2 throttleMs=%3")
+                      .arg(m_h264BroadcastCount)
+                      .arg(frameData.size())
+                      .arg(m_videoFrameIntervalMs));
+            }
+
             QByteArray broadcastFrame = frameData;
             if (parameterSets.isEmpty() && !m_h264ParameterSets.isEmpty()) {
               broadcastFrame.prepend(m_h264ParameterSets);

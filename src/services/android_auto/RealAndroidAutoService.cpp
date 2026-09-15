@@ -7156,6 +7156,22 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
   // For the H.264 WebSocket transport the UI owns decoding. Forward the
   // original encoded payload and avoid the core-side H.264 -> RGBA conversion.
   if (m_videoTransportMode == VideoTransportMode::WEBSOCKET_H264) {
+    ++m_videoEncodedEmitCount;
+    const qint64 emitIntervalMs =
+        m_lastVideoEncodedEmitTimer.isValid() ? m_lastVideoEncodedEmitTimer.elapsed() : -1;
+    m_lastVideoEncodedEmitTimer.restart();
+
+    if (m_videoEncodedEmitCount == 1 || (m_videoEncodedEmitCount % 30) == 0) {
+      aaLogInfo(
+          "videoChannel",
+          QString("H.264 encoded frame cadence: count=%1 intervalMs=%2 bytes=%3 resolution=%4x%5")
+              .arg(m_videoEncodedEmitCount)
+              .arg(emitIntervalMs)
+              .arg(data.size())
+              .arg(width)
+              .arg(height));
+    }
+
     emit videoEncodedFrameReady(width, height, data);
     return;
   }
