@@ -934,9 +934,9 @@ static auto selectVideoResolution(const QSize& resolution)
 static auto negotiatedVideoResolution() -> QSize {
   // Allow override via config; fall back to 1080p.
   const int w = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_width"), 1920, 480, 1920);
+      QStringLiteral("core.android_auto.video.negotiated_width"), 1280, 480, 1920);
   const int h = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_height"), 1080, 270, 1080);
+      QStringLiteral("core.android_auto.video.negotiated_height"), 720, 270, 1080);
   return QSize(w, h);
 }
 
@@ -1055,6 +1055,8 @@ static void appendInputSourceFeature(
   auto* touchscreen = inputService->add_touchscreen();
   touchscreen->set_width(static_cast<uint32_t>(resolution.width()));
   touchscreen->set_height(static_cast<uint32_t>(resolution.height()));
+  touchscreen->set_type(
+      aap_protobuf::service::inputsource::message::TouchScreenType::CAPACITIVE);
 }
 
 static void appendSensorSourceFeature(
@@ -1659,7 +1661,22 @@ class AAControlEventHandler final
     appendAudioSinkFeature(response, m_service->m_telephonyAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_TELEPHONY,
                            16000, 1);
-    appendInputSourceFeature(response, m_service->m_inputChannel, m_service->m_resolution);
+    // The phone's touchscreen coordinate space must match the resolution
+    // advertised by the VIDEO_SINK. In this implementation that is m_resolution,
+    // which is published by the UI before service discovery. The decoder may
+    // render the received stream at a smaller QImage/QVideoSink size, but that
+    // renderer size is not the AA input coordinate space.
+    // The video service advertises m_resolution, which is the UI-published
+    // projection/display coordinate space. The phone uses that same coordinate
+    // space for touchscreen input. Do not use the decoder's negotiated stream
+    // size here: the decoder may receive 1280x720 while rendering/scaling to
+    // the physical UI surface, and those are separate implementation details.
+    appendInputSourceFeature(response, m_service->m_inputChannel,
+                             m_service->m_resolution);
+    aaLogInfo("control",
+              QString("Advertising AA touchscreen geometry: %1x%2 type=CAPACITIVE")
+                  .arg(m_service->m_resolution.width())
+                  .arg(m_service->m_resolution.height()));
     appendSensorSourceFeature(response, m_service->m_sensorChannel);
     appendBluetoothFeature(response, m_service->m_bluetoothChannel);
     appendWifiProjectionFeature(response, m_service->m_wifiProjectionChannel,
@@ -2956,6 +2973,11 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
 
   const AAVideoAdvertisementConfig videoConfig = resolveVideoAdvertisementConfig(settings);
   m_resolution = videoConfig.resolution;
+  // The negotiated video resolution is also the Android Auto touch coordinate
+  // space.  Initialise it here for every transport, including WEBSOCKET_H264.
+  // Previously it was only assigned in the TCP decoder setup path, leaving the
+  // WebSocket H.264 path at the stale 1920x1080 member default.
+  m_negotiatedVideoResolution = videoConfig.resolution;
   m_fps = videoConfig.fps;
   m_videoDensity = videoConfig.density;
   m_videoWidthMargin = videoConfig.widthMargin;
@@ -2985,7 +3007,7 @@ void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& s
                                                   : QStringLiteral("webrtc"));
 
   m_requestedVideoTransportMode =
-      AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+        AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
   m_videoTransportMode = m_requestedVideoTransportMode;
   m_videoTransportFallbackReason.clear();
 
@@ -3441,7 +3463,8 @@ void RealAndroidAutoService::setupChannels() {
     }
 
     // Initialize video decoder
-    if (m_channelConfig.videoEnabled) {
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
       m_videoDecoder = std::make_unique<GStreamerVideoDecoder>(this);
 
       IVideoDecoder::DecoderConfig decoderConfig;
@@ -3679,7 +3702,8 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
     // caused the GStreamer pipeline to initialise at 1024x600 while the phone
     // streams at 1920x1080, triggering a caps renegotiation on the first IDR
     // frame that produced visible HDMI flicker.
-    if (m_channelConfig.videoEnabled) {
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
       const QSize streamRes = negotiatedVideoResolution();
       m_negotiatedVideoResolution = streamRes;
       aaLogInfo("setupChannelsWithTransport",
@@ -4640,15 +4664,26 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
   try {
     using namespace crankshaft::protocol;
 
-    const int boundedX = qBound(0, x, qMax(0, m_resolution.width() - 1));
-    const int boundedY = qBound(0, y, qMax(0, m_resolution.height() - 1));
+    // Touch coordinates are expressed in the Android Auto projection/video
+    // coordinate space, never in the physical UI display space.
+    // Touch coordinates use the same coordinate space advertised by the
+    // INPUT_SOURCE and VIDEO_SINK capabilities. m_resolution is updated from
+    // the UI before service discovery and is also the resolution used by
+    // appendVideoSinkFeature(). The decoder's output size must not influence
+    // the AA input coordinate system.
+    const QSize touchResolution = m_resolution;
+    const int boundedX = qBound(0, x, qMax(0, touchResolution.width() - 1));
+    const int boundedY = qBound(0, y, qMax(0, touchResolution.height() - 1));
 
     // Map action (0=DOWN, 1=UP, 2=MOVE)
     TouchAction touchAction;
+    QString actionLabel = QStringLiteral("MOVED");
     if (action == 0) {
       touchAction = TouchAction::ACTION_DOWN;
+      actionLabel = QStringLiteral("DOWN");
     } else if (action == 1) {
       touchAction = TouchAction::ACTION_UP;
+      actionLabel = QStringLiteral("UP");
     } else {
       touchAction = TouchAction::ACTION_MOVED;
     }
@@ -4656,18 +4691,52 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
     auto data = createTouchInputReport(static_cast<uint32_t>(boundedX),
                                        static_cast<uint32_t>(boundedY), touchAction);
 
+    ++m_touchInputCount;
+
+    const auto* touchEvent = data.has_touch_event() ? &data.touch_event() : nullptr;
+    const bool hasPointer = touchEvent && touchEvent->pointer_data_size() > 0;
+    const auto* pointer = hasPointer ? &touchEvent->pointer_data(0) : nullptr;
+
+    Logger::instance().info(
+        QString("[AA][touch] report #%1: inputChannel=%2 resolution=%3x%4 "
+                "timestamp=%5 bytes=%6 action=%7 actionIndex=%8 pointers=%9 "
+                "pointer0=(%10,%11,id=%12)")
+            .arg(m_touchInputCount)
+            .arg(reinterpret_cast<quintptr>(m_inputChannel.get()), 0, 16)
+            .arg(touchResolution.width())
+            .arg(touchResolution.height())
+            .arg(static_cast<qulonglong>(data.timestamp()))
+            .arg(static_cast<qulonglong>(data.ByteSizeLong()))
+            .arg(touchEvent ? static_cast<int>(touchEvent->action()) : -1)
+            .arg(touchEvent && touchEvent->has_action_index()
+                     ? static_cast<int>(touchEvent->action_index())
+                     : -1)
+            .arg(touchEvent ? touchEvent->pointer_data_size() : 0)
+            .arg(pointer ? static_cast<uint>(pointer->x()) : 0)
+            .arg(pointer ? static_cast<uint>(pointer->y()) : 0)
+            .arg(pointer ? static_cast<uint>(pointer->pointer_id()) : 0));
+
     auto promise = aasdk::channel::SendPromise::defer(*m_strand);
+    const quint64 reportNumber = m_touchInputCount;
     promise->then(
-        []() {
-          // Success - touch input sent
+        [reportNumber, actionLabel]() {
+          Logger::instance().info(
+              QString("[AA][touch] report #%1 transport send SUCCESS action=%2")
+                  .arg(reportNumber)
+                  .arg(actionLabel));
         },
-        [self = QPointer<RealAndroidAutoService>(this)](const aasdk::error::Error& error) {
+        [self = QPointer<RealAndroidAutoService>(this), reportNumber, actionLabel](
+            const aasdk::error::Error& error) {
           const QString errorText = QString::fromStdString(error.what());
           Logger::instance().warning(
-              QString("Failed to send touch input: %1").arg(errorText));
+              QString("[AA][touch] report #%1 transport send FAILED action=%2: %3")
+                  .arg(reportNumber)
+                  .arg(actionLabel)
+                  .arg(errorText));
 
           if (self &&
-              (isSslWrapperNoDeviceErrorText(errorText) || isTransportNoDeviceErrorText(errorText) ||
+              (isSslWrapperNoDeviceErrorText(errorText) ||
+               isTransportNoDeviceErrorText(errorText) ||
                isUsbTransferNoDeviceErrorText(errorText))) {
             self->onChannelError(QStringLiteral("input"), errorText);
           }
@@ -4675,10 +4744,12 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
 
     m_inputChannel->sendInputReport(data, std::move(promise));
 
-    Logger::instance().debug(QString("Touch input sent: x=%1, y=%2, action=%3")
-                   .arg(boundedX)
-                   .arg(boundedY)
-                                 .arg(action));
+    Logger::instance().info(
+        QString("[AA][touch] report #%1 handed to InputSourceService: x=%2 y=%3 action=%4")
+            .arg(reportNumber)
+            .arg(boundedX)
+            .arg(boundedY)
+            .arg(action));
 
     return true;
   } catch (const std::exception& e) {
@@ -7150,6 +7221,29 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
   }
 
   m_videoPayloadCount++;
+
+  // For the H.264 WebSocket transport the UI owns decoding. Forward the
+  // original encoded payload and avoid the core-side H.264 -> RGBA conversion.
+  if (m_videoTransportMode == VideoTransportMode::WEBSOCKET_H264) {
+    ++m_videoEncodedEmitCount;
+    const qint64 emitIntervalMs =
+        m_lastVideoEncodedEmitTimer.isValid() ? m_lastVideoEncodedEmitTimer.elapsed() : -1;
+    m_lastVideoEncodedEmitTimer.restart();
+
+    if (m_videoEncodedEmitCount == 1 || (m_videoEncodedEmitCount % 30) == 0) {
+      aaLogInfo(
+          "videoChannel",
+          QString("H.264 encoded frame cadence: count=%1 intervalMs=%2 bytes=%3 resolution=%4x%5")
+              .arg(m_videoEncodedEmitCount)
+              .arg(emitIntervalMs)
+              .arg(data.size())
+              .arg(width)
+              .arg(height));
+    }
+
+    emit videoEncodedFrameReady(width, height, data);
+    return;
+  }
 
   // H.264 video data from Android device
   if (m_videoDecoder && m_videoDecoder->isReady()) {
