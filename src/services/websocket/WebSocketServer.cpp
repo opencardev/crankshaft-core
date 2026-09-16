@@ -598,7 +598,14 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
           aaService->setFramerate(fps);
         }
       } else if (topic == QStringLiteral("android-auto/touch")) {
+        ++m_touchEventCount;
         const QSize displayResolution = aaService->getDisplayResolution();
+        Logger::instance().info(
+            QString("[WebSocketServer] AA touch received #%1: payload=%2 display=%3x%4")
+                .arg(m_touchEventCount)
+                .arg(QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(payload)).toJson(QJsonDocument::Compact)))
+                .arg(displayResolution.width())
+                .arg(displayResolution.height()));
         const double rawX = payload.value(QStringLiteral("x")).toDouble();
         const double rawY = payload.value(QStringLiteral("y")).toDouble();
 
@@ -623,7 +630,18 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
           action = 1;
         }
 
-        aaService->sendTouchInput(x, y, action);
+        const bool accepted = aaService->sendTouchInput(x, y, action);
+        Logger::instance().info(
+            QString("[WebSocketServer] AA touch dispatch #%1: raw=%2,%3 mapped=%4,%5 "
+                    "actionName=%6 action=%7 accepted=%8")
+                .arg(m_touchEventCount)
+                .arg(rawX, 0, 'f', 3)
+                .arg(rawY, 0, 'f', 3)
+                .arg(x)
+                .arg(y)
+                .arg(actionName)
+                .arg(action)
+                .arg(accepted ? QStringLiteral("true") : QStringLiteral("false")));
       } else if (topic == QStringLiteral("android-auto/key")) {
         const QString keyName = payload.value(QStringLiteral("key")).toString().toUpper();
         const QString keyAction = payload.value(QStringLiteral("action")).toString().toLower();

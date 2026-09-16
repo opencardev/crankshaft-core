@@ -387,6 +387,7 @@ class RealAndroidAutoService : public AndroidAutoService {
   quint64 m_videoPayloadCount{0};
   quint64 m_videoEncodedEmitCount{0};
   QElapsedTimer m_lastVideoEncodedEmitTimer;
+  quint64 m_touchInputCount{0};
 
   quint64 m_videoDecodeSubmitCount{0};
   quint64 m_videoDecodeRejectCount{0};
