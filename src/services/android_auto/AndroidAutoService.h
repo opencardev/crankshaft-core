@@ -44,6 +44,7 @@ class AndroidAutoService : public QObject {
  public:
   enum class VideoTransportMode {
     WEBSOCKET_JPEG,
+    WEBSOCKET_H264,
     WEBRTC,
   };
 
@@ -262,6 +263,11 @@ class AndroidAutoService : public QObject {
    * @param frameData Frame buffer (RGBA)
    */
   void videoFrameReady(int width, int height, const QByteArray& frameData);
+
+  /**
+   * @brief Emitted with the original encoded H.264 video payload.
+   */
+  void videoEncodedFrameReady(int width, int height, const QByteArray& frameData);
 
   /**
    * @brief Emitted when audio data is available

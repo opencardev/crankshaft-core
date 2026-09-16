@@ -22,6 +22,7 @@
 #include <QList>
 #include <QSet>
 #include <QThread>
+#include <QElapsedTimer>
 class QTimer;
 #include <boost/asio.hpp>
 #include <memory>
@@ -384,6 +385,10 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_latency{0};
   quint64 m_videoChannelUpdateCount{0};
   quint64 m_videoPayloadCount{0};
+  quint64 m_videoEncodedEmitCount{0};
+  QElapsedTimer m_lastVideoEncodedEmitTimer;
+  quint64 m_touchInputCount{0};
+
   quint64 m_videoDecodeSubmitCount{0};
   quint64 m_videoDecodeRejectCount{0};
   quint64 m_videoDecodedFrameCount{0};

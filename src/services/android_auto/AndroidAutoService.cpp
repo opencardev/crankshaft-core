@@ -311,6 +311,9 @@ auto AndroidAutoService::videoTransportModeFromString(const QString& mode) -> Vi
   if (normalized == QStringLiteral("webrtc")) {
     return VideoTransportMode::WEBRTC;
   }
+  if (normalized == QStringLiteral("websocket-h264")) {
+    return VideoTransportMode::WEBSOCKET_H264;
+  }
 
   return VideoTransportMode::WEBSOCKET_JPEG;
 }
@@ -319,6 +322,8 @@ auto AndroidAutoService::videoTransportModeToString(VideoTransportMode mode) -> 
   switch (mode) {
     case VideoTransportMode::WEBRTC:
       return QStringLiteral("webrtc");
+    case VideoTransportMode::WEBSOCKET_H264:
+      return QStringLiteral("websocket-h264");
     case VideoTransportMode::WEBSOCKET_JPEG:
       return QStringLiteral("websocket-jpeg");
   }

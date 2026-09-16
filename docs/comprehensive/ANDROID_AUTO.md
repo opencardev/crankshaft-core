@@ -144,8 +144,8 @@ There are **two distinct resolutions** in the Crankshaft Android Auto stack. Con
 Determined once at session setup by `negotiatedVideoResolution()` — a static helper that reads:
 
 ```
-core.android_auto.video.negotiated_width   (default: 1920)
-core.android_auto.video.negotiated_height  (default: 1080)
+core.android_auto.video.negotiated_width   (default: 1280)
+core.android_auto.video.negotiated_height  (default: 720)
 ```
 
 Used in two places, both at session-setup time:
@@ -209,8 +209,8 @@ Fixed by: `rearmActiveReceives()` in `RealAndroidAutoService`; `isRecoverableUsb
 
 | Key | Default | Effect |
 |---|---|---|
-| `core.android_auto.video.negotiated_width` | `1920` | Stream width offered to phone and used for GStreamer init |
-| `core.android_auto.video.negotiated_height` | `1080` | Stream height offered to phone and used for GStreamer init |
+| `core.android_auto.video.negotiated_width` | `1280` | Stream width offered to phone and used for GStreamer init |
+| `core.android_auto.video.negotiated_height` | `720` | Stream height offered to phone and used for GStreamer init |
 | `core.android_auto.video.density_dpi` | `160` | DPI reported to Android Auto (affects UI element sizing on phone) |
 
 ### 13.7 QML Projection Surface
