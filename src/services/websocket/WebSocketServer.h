@@ -25,6 +25,7 @@
 #include <QList>
 #include <QObject>
 #include <QSslConfiguration>
+#include <QSet>
 #include <QTimer>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -193,6 +194,28 @@ class WebSocketServer : public QObject {
   Q_OBJECT
 
  public:
+  struct ClientHelloContractConfig {
+    bool requireClientHello{false};
+    int requiredClientProtocolVersion{1};
+    int minClientVersionMajor{0};
+    bool requireAndroidAutoCapability{false};
+  };
+
+  struct ClientHelloPayload {
+    QString clientKind;
+    QString clientVersion;
+    int protocolVersion{0};
+    QSet<QString> capabilities;
+  };
+
+  enum class ClientHelloDecision {
+    Accepted = 0,
+    MissingClientKind,
+    ProtocolMismatch,
+    VersionTooOld,
+    MissingRequiredCapability
+  };
+
   /**
    * @brief Construct WebSocket server on specified port
    * @param port Port number to listen on (e.g. 8080)
@@ -228,6 +251,13 @@ class WebSocketServer : public QObject {
    * @return true if wss:// connections are supported
    */
   [[nodiscard]] auto isSecureModeEnabled() const -> bool;
+
+  [[nodiscard]] static auto isClientContractSatisfied(bool requireClientHello,
+                                                      bool clientHelloReceived) -> bool;
+  [[nodiscard]] static auto evaluateClientHello(const ClientHelloPayload& payload,
+                                                const ClientHelloContractConfig& config)
+      -> ClientHelloDecision;
+  [[nodiscard]] static auto clientHelloDecisionError(ClientHelloDecision decision) -> QString;
 
   /**
    * @brief Inject service manager for event relay
@@ -315,6 +345,10 @@ class WebSocketServer : public QObject {
                             const QString& path, const QJsonObject& body,
                             const QString& error = QString()) const;
 
+  [[nodiscard]] auto isClientContractSatisfied(QWebSocket* client) const -> bool;
+  void handleClientHello(QWebSocket* client, const QVariantMap& payload);
+  [[nodiscard]] static auto parseVersionMajor(const QString& version) -> int;
+
   /**
    * @brief Check if provided topic matches a subscription pattern
    * @param topic Actual event topic (e.g. "android_auto/connected")
@@ -332,6 +366,11 @@ class WebSocketServer : public QObject {
   QWebSocketServer* m_server;
   QList<QWebSocket*> m_clients;
   QMap<QWebSocket*, QStringList> m_subscriptions;
+  QMap<QWebSocket*, bool> m_clientHelloReceived;
+  QMap<QWebSocket*, QString> m_clientVersion;
+  QMap<QWebSocket*, QString> m_clientKind;
+  QMap<QWebSocket*, int> m_clientProtocolVersion;
+  QMap<QWebSocket*, QSet<QString>> m_clientCapabilities;
   ServiceManager* m_serviceManager;
   bool m_secureModeEnabled;
   QString m_certificatePath;
@@ -342,7 +381,20 @@ class WebSocketServer : public QObject {
   BluetoothManager* m_cachedBluetoothManager{nullptr};
   int m_videoFrameIntervalMs{66};
   quint64 m_videoFrameSequence{0};
+  quint64 m_h264BroadcastCount{0};
+  quint64 m_touchEventCount{0};
+
+  QByteArray m_h264ParameterSets;
+  bool m_loggedH264ParameterSetReplay{false};
   quint64 m_audioChunkSequence{0};
   QJsonObject m_lastProjectionStatus;
   bool m_hasProjectionStatus{false};
+  qint64 m_lastConnectedStateMs{0};
+  qint64 m_lastRenegotiationRequestMs{0};
+  int m_renegotiationCooldownMs{8000};
+  int m_connectedRenegotiationGraceMs{20000};
+  bool m_requireClientHello{false};
+  int m_requiredClientProtocolVersion{1};
+  int m_minClientVersionMajor{0};
+  bool m_requireAndroidAutoCapability{false};
 };

@@ -210,6 +210,12 @@ bool MockAndroidAutoService::setAudioEnabled(bool enabled) {
   return true;
 }
 
+void MockAndroidAutoService::handleWebRtcSignalingMessage(const QString& topic,
+                                                          const QVariantMap& payload) {
+  Q_UNUSED(topic)
+  Q_UNUSED(payload)
+}
+
 QJsonObject MockAndroidAutoService::getAudioConfig() const {
   QJsonObject config;
   config["sampleRate"] = 48000;

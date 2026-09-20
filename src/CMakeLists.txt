@@ -69,6 +69,8 @@ pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
 pkg_check_modules(GSTREAMER_APP REQUIRED gstreamer-app-1.0)
 pkg_check_modules(GSTREAMER_VIDEO REQUIRED gstreamer-video-1.0)
 pkg_check_modules(GSTREAMER_AUDIO REQUIRED gstreamer-audio-1.0)
+pkg_check_modules(GSTREAMER_WEBRTC QUIET gstreamer-webrtc-1.0)
+pkg_check_modules(GSTREAMER_SDP QUIET gstreamer-sdp-1.0)
 
 # Find DBus for wireless/bluetooth
 pkg_check_modules(DBUS REQUIRED dbus-1)
@@ -104,6 +106,7 @@ set(CORE_SOURCES
   services/android_auto/AndroidAutoService.cpp
   services/android_auto/MockAndroidAutoService.cpp
   services/android_auto/RealAndroidAutoService.cpp
+  services/android_auto/AasdkErrorClassification.h
   services/android_auto/WiFiManagerWirelessNetworkManager.cpp
   services/android_auto/ProtocolHelpers.cpp
   services/preferences/PreferencesService.cpp
@@ -130,7 +133,9 @@ set(CORE_SOURCES
 
   # Multimedia HAL
   hal/multimedia/IVideoDecoder.cpp
+  hal/multimedia/GStreamerWebRtcBridge.h
   hal/multimedia/GStreamerVideoDecoder.cpp
+  hal/multimedia/GStreamerWebRtcBridge.cpp
   hal/multimedia/IAudioMixer.cpp
   hal/multimedia/AudioMixer.cpp
   hal/multimedia/AudioHAL.cpp
@@ -155,6 +160,8 @@ target_include_directories(crankshaft-core-lib PRIVATE
   ${GSTREAMER_APP_INCLUDE_DIRS}
   ${GSTREAMER_VIDEO_INCLUDE_DIRS}
   ${GSTREAMER_AUDIO_INCLUDE_DIRS}
+  ${GSTREAMER_WEBRTC_INCLUDE_DIRS}
+  ${GSTREAMER_SDP_INCLUDE_DIRS}
   ${DBUS_INCLUDE_DIRS}
   ${LIBUSB_INCLUDE_DIRS}
 )
@@ -235,6 +242,8 @@ target_link_libraries(crankshaft-core-lib PRIVATE
   ${GSTREAMER_APP_LIBRARIES}
   ${GSTREAMER_VIDEO_LIBRARIES}
   ${GSTREAMER_AUDIO_LIBRARIES}
+  ${GSTREAMER_WEBRTC_LIBRARIES}
+  ${GSTREAMER_SDP_LIBRARIES}
   ${DBUS_LIBRARIES}
   ${LIBUSB_LIBRARIES}
   OpenSSL::SSL
@@ -243,6 +252,12 @@ target_link_libraries(crankshaft-core-lib PRIVATE
   CRANKSHAFT_AASDK
   nlohmann_json::nlohmann_json
 )
+
+if(GSTREAMER_WEBRTC_FOUND AND GSTREAMER_SDP_FOUND)
+  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=1 GST_USE_UNSTABLE_API)
+else()
+  target_compile_definitions(crankshaft-core-lib PRIVATE HAVE_GSTREAMER_WEBRTC=0)
+endif()
 target_link_libraries(crankshaft-core PRIVATE crankshaft-core-lib)
   # Note: json-schema-validator is header-only and its include directories
   # are made available via FetchContent; no link target is required here.
@@ -337,7 +352,7 @@ set(CPACK_PACKAGE_VERSION "${CRANKSHAFT_CORE_VERSION}")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 # Keep explicit Qt/system runtime dependencies and allow both legacy and t64
 # package names so dependencies resolve across Debian/Ubuntu releases.
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64, libqt6core6 | libqt6core6t64, libqt6network6 | libqt6network6t64, libqt6websockets6 | libqt6websockets6t64, libqt6gui6 | libqt6gui6t64, libqt6dbus6 | libqt6dbus6t64, libqt6sql6 | libqt6sql6t64, libqt6bluetooth6 | libqt6bluetooth6t64, libqt6multimedia6 | libqt6multimedia6t64, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, libgstreamer1.0-0 | libgstreamer1.0-0t64, libgstreamer-plugins-base1.0-0 | libgstreamer-plugins-base1.0-0t64, dbus, libusb-1.0-0, libssl3 | libssl3t64, libprotobuf32 | libprotobuf32t64, libasound2 | libasound2t64, libpulse0 | libpulse0t64")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64, libqt6core6 | libqt6core6t64, libqt6network6 | libqt6network6t64, libqt6websockets6 | libqt6websockets6t64, libqt6gui6 | libqt6gui6t64, libqt6dbus6 | libqt6dbus6t64, libqt6sql6 | libqt6sql6t64, libqt6bluetooth6 | libqt6bluetooth6t64, libqt6multimedia6 | libqt6multimedia6t64, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, libgstreamer1.0-0 | libgstreamer1.0-0t64, libgstreamer-plugins-base1.0-0 | libgstreamer-plugins-base1.0-0t64, libgstreamer-plugins-bad1.0-0 | libgstreamer-plugins-bad1.0-0t64, libnice10 | libnice10t64, libsrtp2-1 | libsrtp2-1t64, dbus, libusb-1.0-0, libssl3 | libssl3t64, libprotobuf32 | libprotobuf32t64, libasound2 | libasound2t64, libpulse0 | libpulse0t64")
 set(CPACK_COMPONENTS_ALL core)
 
 # Resolve Debian package architecture for filename generation

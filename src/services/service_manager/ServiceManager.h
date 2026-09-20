@@ -175,6 +175,12 @@ class ServiceManager : public QObject {
   bool m_androidAutoControlVersionReceived{false};
   bool m_androidAutoServiceDiscoveryCompleted{false};
   bool m_androidAutoConnectedDuringStartup{false};
+  qint64 m_androidAutoStartupBeginMs{0};
+  qint64 m_androidAutoLastStateChangeMs{0};
+  qint64 m_androidAutoLastDisconnectMs{0};
+  qint64 m_androidAutoLastStartupRenegotiateMs{0};
+  int m_androidAutoStartupDisconnectCount{0};
+  bool m_androidAutoStartupRenegotiateIssued{false};
 
   WiFiManagerFactory m_wifiManagerFactory;
   BluetoothManagerFactory m_bluetoothManagerFactory;

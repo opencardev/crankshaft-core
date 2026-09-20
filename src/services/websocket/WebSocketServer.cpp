@@ -26,6 +26,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSslCertificate>
 #include <QSslKey>
 #include <QStringList>
@@ -74,12 +75,94 @@ static auto normaliseVendorFilterList(const QVariant& rawValue) -> QStringList {
   return values;
 }
 
+static auto videoTransportModeToString(AndroidAutoService::VideoTransportMode mode) -> QString {
+  switch (mode) {
+    case AndroidAutoService::VideoTransportMode::WEBSOCKET_JPEG:
+      return QStringLiteral("websocket-jpeg");
+    case AndroidAutoService::VideoTransportMode::WEBSOCKET_H264:
+      return QStringLiteral("websocket-h264");
+    case AndroidAutoService::VideoTransportMode::WEBRTC:
+      return QStringLiteral("webrtc");
+  }
+
+  return QStringLiteral("unknown");
+}
+
+static auto extractH264ParameterSets(const QByteArray& frameData) -> QByteArray {
+  struct NaluStart {
+    int start{0};
+    int payload{0};
+  };
+
+  QList<NaluStart> nalus;
+  for (int index = 0; index + 3 < frameData.size(); ++index) {
+    if (frameData.at(index) != '\0' || frameData.at(index + 1) != '\0') {
+      continue;
+    }
+
+    if (frameData.at(index + 2) == '\x01') {
+      nalus.append({index, index + 3});
+    } else if (index + 4 < frameData.size() && frameData.at(index + 2) == '\0' &&
+               frameData.at(index + 3) == '\x01') {
+      nalus.append({index, index + 4});
+      ++index;
+    }
+  }
+
+  QByteArray parameterSets;
+  for (int index = 0; index < nalus.size(); ++index) {
+    const NaluStart& nalu = nalus.at(index);
+    if (nalu.payload >= frameData.size()) {
+      continue;
+    }
+
+    const int type = static_cast<unsigned char>(frameData.at(nalu.payload)) & 0x1F;
+    if (type != 7 && type != 8) {
+      continue;
+    }
+
+    const int end = index + 1 < nalus.size() ? nalus.at(index + 1).start : frameData.size();
+    parameterSets.append(frameData.constData() + nalu.start, end - nalu.start);
+  }
+
+  return parameterSets;
+}
+
 WebSocketServer::WebSocketServer(quint16 port, QObject* parent)
     : QObject(parent),
       m_server(new QWebSocketServer("CrankshaftCore", QWebSocketServer::NonSecureMode, this)),
       m_serviceManager(nullptr),
       m_secureModeEnabled(false) {
   Logger::instance().info(QString("Initializing WebSocket server on port %1...").arg(port));
+
+  m_renegotiationCooldownMs = qBound(
+    1000,
+    ConfigService::instance()
+      .get("core.android_auto.websocket.renegotiation_cooldown_ms", 8000)
+      .toInt(),
+    60000);
+    m_connectedRenegotiationGraceMs = qBound(
+      2000,
+      ConfigService::instance()
+        .get("core.android_auto.websocket.renegotiation_connected_grace_ms", 20000)
+        .toInt(),
+      180000);
+      m_requireClientHello =
+        ConfigService::instance().get("core.websocket.client_contract.require_hello", false).toBool();
+      m_requiredClientProtocolVersion = qBound(
+        1,
+        ConfigService::instance()
+          .get("core.websocket.client_contract.required_protocol_version", 1)
+          .toInt(),
+        100);
+      m_minClientVersionMajor = qBound(
+        0,
+        ConfigService::instance().get("core.websocket.client_contract.min_client_major", 0).toInt(),
+        1000);
+      m_requireAndroidAutoCapability = ConfigService::instance()
+                         .get("core.websocket.client_contract.require_aa_capability",
+                          false)
+                         .toBool();
 
   if (m_server->listen(QHostAddress::Any, port)) {
     Logger::instance().info(QString("WebSocket server listening on port %1 (ws://)").arg(port));
@@ -131,6 +214,11 @@ void WebSocketServer::onNewConnection() {
 
   m_clients.append(client);
   m_subscriptions[client] = QStringList();
+  m_clientHelloReceived[client] = false;
+  m_clientVersion[client] = QString();
+  m_clientKind[client] = QStringLiteral("unknown");
+  m_clientProtocolVersion[client] = 0;
+  m_clientCapabilities[client] = QSet<QString>();
 }
 
 void WebSocketServer::onTextMessageReceived(const QString& message) {
@@ -157,16 +245,39 @@ void WebSocketServer::onTextMessageReceived(const QString& message) {
   QString type = obj.value("type").toString();
 
   if (type == "subscribe") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString topic = obj.value("topic").toString();
     handleSubscribe(client, topic);
   } else if (type == "unsubscribe") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString topic = obj.value("topic").toString();
     handleUnsubscribe(client, topic);
   } else if (type == "publish") {
     QString topic = obj.value("topic").toString();
     QVariantMap payload = obj.value("payload").toObject().toVariantMap();
+
+    if (topic == QStringLiteral("client/hello")) {
+      handleClientHello(client, payload);
+      return;
+    }
+
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
+
     handlePublish(topic, payload);
   } else if (type == "service_command") {
+    if (!isClientContractSatisfied(client)) {
+      sendError(client, QStringLiteral("client_contract_not_satisfied"));
+      return;
+    }
     QString command = obj.value("command").toString();
     QString commandError;
     if (!validateServiceCommand(command, commandError)) {
@@ -179,6 +290,8 @@ void WebSocketServer::onTextMessageReceived(const QString& message) {
     handleServiceCommand(client, command, params);
   } else if (type == "admin_api") {
     handleAdminApiRequest(client, obj);
+  } else if (type == "client_hello") {
+    handleClientHello(client, obj.value(QStringLiteral("payload")).toObject().toVariantMap());
   }
 }
 
@@ -189,8 +302,140 @@ void WebSocketServer::onClientDisconnected() {
         QString("Client disconnected: %1").arg(client->peerAddress().toString()));
     m_clients.removeOne(client);
     m_subscriptions.remove(client);
+    m_clientHelloReceived.remove(client);
+    m_clientVersion.remove(client);
+    m_clientKind.remove(client);
+    m_clientProtocolVersion.remove(client);
+    m_clientCapabilities.remove(client);
     client->deleteLater();
   }
+}
+
+bool WebSocketServer::isClientContractSatisfied(QWebSocket* client) const {
+  if (!client) {
+    return false;
+  }
+
+  return isClientContractSatisfied(m_requireClientHello, m_clientHelloReceived.value(client, false));
+}
+
+bool WebSocketServer::isClientContractSatisfied(bool requireClientHello,
+                                                bool clientHelloReceived) {
+  if (!requireClientHello) {
+    return true;
+  }
+
+  return clientHelloReceived;
+}
+
+int WebSocketServer::parseVersionMajor(const QString& version) {
+  static const QRegularExpression majorPattern(QStringLiteral("^(\\d+)"));
+  const QRegularExpressionMatch match = majorPattern.match(version.trimmed());
+  if (!match.hasMatch()) {
+    return -1;
+  }
+
+  bool ok = false;
+  const int major = match.captured(1).toInt(&ok);
+  return ok ? major : -1;
+}
+
+WebSocketServer::ClientHelloDecision WebSocketServer::evaluateClientHello(
+    const ClientHelloPayload& payload,
+    const ClientHelloContractConfig& config) {
+  if (payload.clientKind.trimmed().isEmpty()) {
+    return ClientHelloDecision::MissingClientKind;
+  }
+
+  if (payload.protocolVersion < config.requiredClientProtocolVersion) {
+    return ClientHelloDecision::ProtocolMismatch;
+  }
+
+  if (config.minClientVersionMajor > 0) {
+    const int majorVersion = parseVersionMajor(payload.clientVersion);
+    if (majorVersion >= 0 && majorVersion < config.minClientVersionMajor) {
+      return ClientHelloDecision::VersionTooOld;
+    }
+  }
+
+  if (config.requireAndroidAutoCapability &&
+      !payload.capabilities.contains(QStringLiteral("android_auto"))) {
+    return ClientHelloDecision::MissingRequiredCapability;
+  }
+
+  return ClientHelloDecision::Accepted;
+}
+
+QString WebSocketServer::clientHelloDecisionError(ClientHelloDecision decision) {
+  switch (decision) {
+    case ClientHelloDecision::Accepted:
+      return QString();
+    case ClientHelloDecision::MissingClientKind:
+      return QStringLiteral("client_hello_missing_client_kind");
+    case ClientHelloDecision::ProtocolMismatch:
+      return QStringLiteral("client_hello_protocol_mismatch");
+    case ClientHelloDecision::VersionTooOld:
+      return QStringLiteral("client_hello_version_too_old");
+    case ClientHelloDecision::MissingRequiredCapability:
+      return QStringLiteral("client_hello_missing_required_capability");
+  }
+
+  return QStringLiteral("client_hello_rejected");
+}
+
+void WebSocketServer::handleClientHello(QWebSocket* client, const QVariantMap& payload) {
+  if (!client) {
+    return;
+  }
+
+  const QString clientKind = payload.value(QStringLiteral("client_kind")).toString().trimmed();
+  const QString clientVersion = payload.value(QStringLiteral("client_version")).toString().trimmed();
+  const int protocolVersion = payload.value(QStringLiteral("client_protocol_version")).toInt();
+  const QVariantList capabilitiesRaw = payload.value(QStringLiteral("capabilities")).toList();
+
+  QSet<QString> capabilities;
+  for (const QVariant& entry : capabilitiesRaw) {
+    const QString cap = entry.toString().trimmed();
+    if (!cap.isEmpty()) {
+      capabilities.insert(cap);
+    }
+  }
+
+  const ClientHelloPayload helloPayload{clientKind, clientVersion, protocolVersion, capabilities};
+  const ClientHelloContractConfig contractConfig{m_requireClientHello,
+                                                 m_requiredClientProtocolVersion,
+                                                 m_minClientVersionMajor,
+                                                 m_requireAndroidAutoCapability};
+  const ClientHelloDecision decision = evaluateClientHello(helloPayload, contractConfig);
+
+  if (decision != ClientHelloDecision::Accepted) {
+    const QString errorCode = clientHelloDecisionError(decision);
+    Logger::instance().warning(
+        QString("[WebSocketServer] Rejecting client hello: kind=%1 version=%2 protocol=%3 error=%4")
+            .arg(clientKind)
+            .arg(clientVersion)
+            .arg(protocolVersion)
+            .arg(errorCode));
+    sendError(client, errorCode);
+    if (m_requireClientHello) {
+      client->close();
+    }
+    return;
+  }
+
+  m_clientHelloReceived[client] = true;
+  m_clientKind[client] = clientKind;
+  m_clientVersion[client] = clientVersion;
+  m_clientProtocolVersion[client] = protocolVersion;
+  m_clientCapabilities[client] = capabilities;
+
+  Logger::instance().info(
+      QString("[WebSocketServer] Client hello accepted: kind=%1 version=%2 protocol=%3 "
+              "capabilities=[%4]")
+          .arg(clientKind)
+          .arg(clientVersion)
+          .arg(protocolVersion)
+          .arg(QStringList(capabilities.values()).join(',')));
 }
 
 void WebSocketServer::handleSubscribe(QWebSocket* client, const QString& topic) {
@@ -239,6 +484,14 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
   if (topic.startsWith(QStringLiteral("android-auto/")) && m_serviceManager) {
     AndroidAutoService* aaService = m_serviceManager->getAndroidAutoService();
     if (aaService) {
+      if (topic.startsWith(QStringLiteral("android-auto/webrtc/"))) {
+        Logger::instance().info(
+            QString("[WebSocketServer] Forwarding Android Auto WebRTC signaling topic to service: %1")
+                .arg(topic));
+        aaService->handleWebRtcSignalingMessage(topic, payload);
+        return;
+      }
+
       if (topic == QStringLiteral("android-auto/launch")) {
         const QString serialNumber = payload.value(QStringLiteral("serial_number")).toString();
         if (serialNumber.isEmpty()) {
@@ -248,12 +501,64 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
         }
       } else if (topic == QStringLiteral("android-auto/renegotiate") ||
                  topic == QStringLiteral("android-auto/reconnect")) {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const auto state = aaService->getConnectionState();
+
+        const bool projectionReady =
+          m_lastProjectionStatus.value(QStringLiteral("projection_ready")).toBool(false);
+        const bool controlVersionReceived =
+          m_lastProjectionStatus.value(QStringLiteral("control_version_received")).toBool(false);
+        const bool serviceDiscoveryCompleted =
+          m_lastProjectionStatus.value(QStringLiteral("service_discovery_completed")).toBool(false);
+
+        if (state == AndroidAutoService::ConnectionState::CONNECTED) {
+          const qint64 connectedAgeMs =
+            m_lastConnectedStateMs > 0 ? (nowMs - m_lastConnectedStateMs) : LLONG_MAX;
+          const bool hasBringupProgress =
+            projectionReady || controlVersionReceived || serviceDiscoveryCompleted;
+
+          if (connectedAgeMs >= 0 && connectedAgeMs < m_connectedRenegotiationGraceMs &&
+            hasBringupProgress) {
+          Logger::instance().warning(
+            QString("[WebSocketServer] Suppressed Android Auto renegotiation "
+                "(connected warm-up grace active, age=%1 ms, grace=%2 ms, "
+                "projection_ready=%3, control_version_received=%4, "
+                "service_discovery_completed=%5, topic=%6)")
+              .arg(connectedAgeMs)
+              .arg(m_connectedRenegotiationGraceMs)
+              .arg(projectionReady ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(controlVersionReceived ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(serviceDiscoveryCompleted ? QStringLiteral("true") : QStringLiteral("false"))
+              .arg(topic));
+          return;
+          }
+        }
+
+        const qint64 elapsedSinceLastMs =
+          m_lastRenegotiationRequestMs > 0 ? (nowMs - m_lastRenegotiationRequestMs) : LLONG_MAX;
+        if (m_lastRenegotiationRequestMs > 0 &&
+          elapsedSinceLastMs >= 0 && elapsedSinceLastMs < m_renegotiationCooldownMs) {
+          const qint64 remainingMs = m_renegotiationCooldownMs - elapsedSinceLastMs;
+          Logger::instance().warning(
+            QString("[WebSocketServer] Suppressed Android Auto renegotiation (cooldown active, "
+                "remaining %1 ms, elapsed %2 ms, topic=%3)")
+              .arg(remainingMs)
+              .arg(elapsedSinceLastMs)
+              .arg(topic));
+          return;
+        }
+
+        m_lastRenegotiationRequestMs = nowMs;
+
         const int relaunchDelayMs =
             qBound(1500, payload.value(QStringLiteral("relaunch_delay_ms"), 2500).toInt(), 30000);
 
         Logger::instance().info(
-            QString("[WebSocketServer] Forcing Android Auto renegotiation (relaunch delay %1 ms)")
-                .arg(relaunchDelayMs));
+          QString("[WebSocketServer] Accepting Android Auto renegotiation "
+              "(topic=%1, relaunch delay %2 ms, cooldown %3 ms)")
+            .arg(topic)
+            .arg(relaunchDelayMs)
+            .arg(m_renegotiationCooldownMs));
 
         aaService->disconnect();
 
@@ -284,8 +589,23 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
               QString("[WebSocketServer] Received display resolution update from UI: %1x%2").arg(width).arg(height));
           aaService->setDisplayResolution(QSize(width, height));
         }
+      } else if (topic == QStringLiteral("android-auto/display/fps")) {
+        const int fps = payload.value(QStringLiteral("fps")).toInt();
+        if (fps > 0) {
+          Logger::instance().info(
+              QString("[WebSocketServer] Received display framerate update from UI: %1 fps")
+                  .arg(fps));
+          aaService->setFramerate(fps);
+        }
       } else if (topic == QStringLiteral("android-auto/touch")) {
+        ++m_touchEventCount;
         const QSize displayResolution = aaService->getDisplayResolution();
+        Logger::instance().info(
+            QString("[WebSocketServer] AA touch received #%1: payload=%2 display=%3x%4")
+                .arg(m_touchEventCount)
+                .arg(QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(payload)).toJson(QJsonDocument::Compact)))
+                .arg(displayResolution.width())
+                .arg(displayResolution.height()));
         const double rawX = payload.value(QStringLiteral("x")).toDouble();
         const double rawY = payload.value(QStringLiteral("y")).toDouble();
 
@@ -310,7 +630,18 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
           action = 1;
         }
 
-        aaService->sendTouchInput(x, y, action);
+        const bool accepted = aaService->sendTouchInput(x, y, action);
+        Logger::instance().info(
+            QString("[WebSocketServer] AA touch dispatch #%1: raw=%2,%3 mapped=%4,%5 "
+                    "actionName=%6 action=%7 accepted=%8")
+                .arg(m_touchEventCount)
+                .arg(rawX, 0, 'f', 3)
+                .arg(rawY, 0, 'f', 3)
+                .arg(x)
+                .arg(y)
+                .arg(actionName)
+                .arg(action)
+                .arg(accepted ? QStringLiteral("true") : QStringLiteral("false")));
       } else if (topic == QStringLiteral("android-auto/key")) {
         const QString keyName = payload.value(QStringLiteral("key")).toString().toUpper();
         const QString keyAction = payload.value(QStringLiteral("action")).toString().toLower();
@@ -596,6 +927,33 @@ void WebSocketServer::processAdminRoute(const QString& method, const QString& pa
     responseBody[QStringLiteral("websocket_secure_mode")] = m_secureModeEnabled;
     responseBody[QStringLiteral("android_auto_connected")] =
         m_serviceManager->getAndroidAutoService() && m_serviceManager->getAndroidAutoService()->isConnected();
+    responseBody[QStringLiteral("client_contract")] =
+        QJsonObject{{QStringLiteral("require_hello"), m_requireClientHello},
+                    {QStringLiteral("required_protocol_version"), m_requiredClientProtocolVersion},
+                    {QStringLiteral("min_client_major"), m_minClientVersionMajor},
+                    {QStringLiteral("require_android_auto_capability"),
+                     m_requireAndroidAutoCapability}};
+
+    QJsonArray connectedClients;
+    for (QWebSocket* client : m_clients) {
+      if (!client) {
+        continue;
+      }
+
+      connectedClients.append(
+          QJsonObject{{QStringLiteral("peer"), client->peerAddress().toString()},
+                      {QStringLiteral("hello_received"),
+                       m_clientHelloReceived.value(client, false)},
+                      {QStringLiteral("client_kind"),
+                       m_clientKind.value(client, QStringLiteral("unknown"))},
+                      {QStringLiteral("client_version"), m_clientVersion.value(client, QString())},
+                      {QStringLiteral("client_protocol_version"),
+                       m_clientProtocolVersion.value(client, 0)},
+                      {QStringLiteral("capabilities"),
+                       QJsonArray::fromStringList(
+                           QStringList(m_clientCapabilities.value(client, QSet<QString>()).values()))}});
+    }
+    responseBody[QStringLiteral("connected_clients")] = connectedClients;
     statusCode = 200;
     return;
   }
@@ -884,16 +1242,78 @@ void WebSocketServer::setupAndroidAutoConnections() {
           &WebSocketServer::onAndroidAutoError);
   connect(aaService, &AndroidAutoService::videoFrameReady, this,
           &WebSocketServer::onAndroidAutoVideoFrameReady);
+  connect(aaService, &AndroidAutoService::videoEncodedFrameReady, this,
+          [this](int width, int height, const QByteArray& frameData) {
+            if (frameData.isEmpty()) {
+              return;
+            }
+
+            const QByteArray parameterSets = extractH264ParameterSets(frameData);
+            if (!parameterSets.isEmpty()) {
+              m_h264ParameterSets = parameterSets;
+            }
+
+            if (!hasAnySubscriberForTopic(QStringLiteral("android-auto/media/video-frame"))) {
+              return;
+            }
+            if (!m_videoFrameTimer.isValid()) {
+              m_videoFrameTimer.start();
+            }
+            const qint64 nowMs = m_videoFrameTimer.elapsed();
+            if ((nowMs - m_lastVideoFrameBroadcastMs) < m_videoFrameIntervalMs) {
+              return;
+            }
+            m_lastVideoFrameBroadcastMs = nowMs;
+
+            ++m_h264BroadcastCount;
+            if (m_h264BroadcastCount == 1 || (m_h264BroadcastCount % 30) == 0) {
+              Logger::instance().info(
+                  QString("[WebSocketServer] H.264 broadcast: count=%1 sourceBytes=%2 throttleMs=%3")
+                      .arg(m_h264BroadcastCount)
+                      .arg(frameData.size())
+                      .arg(m_videoFrameIntervalMs));
+            }
+
+            QByteArray broadcastFrame = frameData;
+            if (parameterSets.isEmpty() && !m_h264ParameterSets.isEmpty()) {
+              broadcastFrame.prepend(m_h264ParameterSets);
+              if (!m_loggedH264ParameterSetReplay) {
+                m_loggedH264ParameterSetReplay = true;
+                Logger::instance().info(
+                    "[WebSocketServer] Replaying cached H.264 SPS/PPS before late slice frame");
+              }
+            }
+
+            QVariantMap payload;
+            payload["width"] = width;
+            payload["height"] = height;
+            payload["encoding"] = "h264-base64";
+            payload["sequence"] = static_cast<qulonglong>(++m_videoFrameSequence);
+            payload["data"] = QString::fromLatin1(broadcastFrame.toBase64());
+            broadcastEvent("android-auto/media/video-frame", payload);
+          });
   connect(aaService, &AndroidAutoService::audioDataReady, this,
           &WebSocketServer::onAndroidAutoAudioDataReady);
   connect(aaService, &AndroidAutoService::projectionStatusChanged, this,
           &WebSocketServer::onAndroidAutoProjectionStatus);
+    connect(aaService, &AndroidAutoService::webRtcSignalingMessage, this,
+      [this](const QString& topic, const QVariantMap& payload) {
+        broadcastEvent(topic, payload);
+      });
 
   Logger::instance().info("[WebSocketServer] Android Auto service connections setup");
 }
 
 void WebSocketServer::onAndroidAutoStateChanged(int state) {
   Logger::instance().info(QString("[WebSocketServer] Android Auto state changed: %1").arg(state));
+
+  if (state == static_cast<int>(AndroidAutoService::ConnectionState::CONNECTED)) {
+    m_lastConnectedStateMs = QDateTime::currentMSecsSinceEpoch();
+  } else if (state == static_cast<int>(AndroidAutoService::ConnectionState::DISCONNECTED) ||
+             state == static_cast<int>(AndroidAutoService::ConnectionState::ERROR)) {
+    m_lastConnectedStateMs = 0;
+  }
+
   QVariantMap payload;
   payload["state"] = state;
 
@@ -925,6 +1345,8 @@ void WebSocketServer::onAndroidAutoDeviceFound(const QVariantMap& device) {
 }
 
 void WebSocketServer::onAndroidAutoDisconnected() {
+  m_h264ParameterSets.clear();
+  m_loggedH264ParameterSetReplay = false;
   QVariantMap payload;
   payload["connected"] = false;
   broadcastEvent("android-auto/status/disconnected", payload);
@@ -1013,17 +1435,29 @@ void WebSocketServer::onAndroidAutoAudioDataReady(const QByteArray& data) {
 }
 
 void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
+  QJsonObject statusWithTransport = status;
+  if (m_serviceManager) {
+  AndroidAutoService* aaService = m_serviceManager->getAndroidAutoService();
+  if (aaService) {
+    statusWithTransport.insert(QStringLiteral("video_transport_mode"),
+                 videoTransportModeToString(aaService->getVideoTransportMode()));
+  }
+  }
+
   const bool previousAvailable = m_hasProjectionStatus;
-  const bool projectionReady = status.value(QStringLiteral("projection_ready")).toBool(false);
+  const bool projectionReady = statusWithTransport.value(QStringLiteral("projection_ready")).toBool(false);
   const bool controlVersionReceived =
-      status.value(QStringLiteral("control_version_received")).toBool(false);
-  const bool videoReady = status.value(QStringLiteral("video_ready")).toBool(false);
-  const bool mediaAudioReady = status.value(QStringLiteral("media_audio_ready")).toBool(false);
+    statusWithTransport.value(QStringLiteral("control_version_received")).toBool(false);
+  const bool videoReady = statusWithTransport.value(QStringLiteral("video_ready")).toBool(false);
+  const bool mediaAudioReady =
+    statusWithTransport.value(QStringLiteral("media_audio_ready")).toBool(false);
   const bool serviceDiscoveryCompleted =
-      status.value(QStringLiteral("service_discovery_completed")).toBool(false);
+    statusWithTransport.value(QStringLiteral("service_discovery_completed")).toBool(false);
   const QString connectionStateName =
-      status.value(QStringLiteral("connection_state_name")).toString();
-  const QString reason = status.value(QStringLiteral("reason")).toString();
+    statusWithTransport.value(QStringLiteral("connection_state_name")).toString();
+  const QString reason = statusWithTransport.value(QStringLiteral("reason")).toString();
+  const QString videoTransportMode =
+    statusWithTransport.value(QStringLiteral("video_transport_mode")).toString();
 
   bool changed = !previousAvailable;
   if (previousAvailable) {
@@ -1035,6 +1469,7 @@ void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
               boolChanged(QStringLiteral("video_ready")) ||
               boolChanged(QStringLiteral("media_audio_ready")) ||
               boolChanged(QStringLiteral("service_discovery_completed")) ||
+              boolChanged(QStringLiteral("video_transport_mode")) ||
               boolChanged(QStringLiteral("connection_state_name")) ||
               boolChanged(QStringLiteral("reason"));
   }
@@ -1043,26 +1478,28 @@ void WebSocketServer::onAndroidAutoProjectionStatus(const QJsonObject& status) {
     Logger::instance().info(
         QString("[WebSocketServer] channel-status values: state=%1 projection_ready=%2 "
                 "control_version_received=%3 video_ready=%4 media_audio_ready=%5 "
-                "service_discovery_completed=%6 reason=%7")
+                "video_transport_mode=%6 service_discovery_completed=%7 reason=%8")
             .arg(connectionStateName)
             .arg(projectionReady ? "true" : "false")
             .arg(controlVersionReceived ? "true" : "false")
             .arg(videoReady ? "true" : "false")
             .arg(mediaAudioReady ? "true" : "false")
+            .arg(videoTransportMode)
             .arg(serviceDiscoveryCompleted ? "true" : "false")
             .arg(reason));
   }
 
-  m_lastProjectionStatus = status;
+  m_lastProjectionStatus = statusWithTransport;
   m_hasProjectionStatus = true;
 
-  broadcastEvent("android-auto/status/channel-status", status.toVariantMap());
+  broadcastEvent("android-auto/status/channel-status", statusWithTransport.toVariantMap());
 }
 
 bool WebSocketServer::validateMessage(const QJsonObject& obj, QString& error) const {
   static const QSet<QString> allowedTypes = {
       QStringLiteral("subscribe"), QStringLiteral("unsubscribe"), QStringLiteral("publish"),
-      QStringLiteral("service_command"), QStringLiteral("admin_api")};
+  QStringLiteral("service_command"), QStringLiteral("admin_api"),
+  QStringLiteral("client_hello")};
 
   const QString type = obj.value("type").toString();
   if (type.isEmpty() || !allowedTypes.contains(type)) {
@@ -1080,6 +1517,13 @@ bool WebSocketServer::validateMessage(const QJsonObject& obj, QString& error) co
 
   if (type == "publish") {
     if (!obj.contains("payload") || !obj.value("payload").isObject()) {
+      error = QStringLiteral("invalid_payload");
+      return false;
+    }
+  }
+
+  if (type == "client_hello") {
+    if (!obj.contains(QStringLiteral("payload")) || !obj.value(QStringLiteral("payload")).isObject()) {
       error = QStringLiteral("invalid_payload");
       return false;
     }

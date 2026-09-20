@@ -19,34 +19,33 @@
 
 #pragma once
 
+#include <QJsonObject>
 #include <QObject>
+#include <QSize>
 #include <QString>
 #include <QVariantMap>
+#include <memory>
 
-class ConfigService : public QObject {
+class GStreamerWebRtcBridge : public QObject {
   Q_OBJECT
 
  public:
-  [[nodiscard]] static ConfigService& instance();
+  explicit GStreamerWebRtcBridge(QObject* parent = nullptr);
+  ~GStreamerWebRtcBridge() override;
 
-  auto load(const QString& filePath) -> bool;
-  auto save(const QString& filePath) -> bool;
-  [[nodiscard]] auto loadedFilePath() const -> QString;
-  [[nodiscard]] auto lastLoadError() const -> QString;
+  bool initialize(const QSize& streamResolution, int fps);
+  void deinitialize();
+  bool isInitialized() const;
 
-  [[nodiscard]] QVariant get(const QString& key, const QVariant& defaultValue = QVariant()) const;
-  void set(const QString& key, const QVariant& value);
+  bool pushVideoFrame(const QByteArray& encodedFrame);
+  bool handleWebRtcSignalingMessage(const QString& topic, const QVariantMap& payload);
 
  signals:
-  void configChanged(const QString& key, const QVariant& value);
+  void signalingMessageReady(const QString& topic, const QVariantMap& payload);
+  void statusChanged(const QJsonObject& status);
+  void errorOccurred(const QString& error);
 
  private:
-  ConfigService() = default;
-  ~ConfigService() = default;
-  ConfigService(const ConfigService&) = delete;
-  ConfigService& operator=(const ConfigService&) = delete;
-
-  QVariantMap m_config;
-  QString m_loadedFilePath;
-  QString m_lastLoadError;
+  struct Private;
+  std::unique_ptr<Private> m_private;
 };

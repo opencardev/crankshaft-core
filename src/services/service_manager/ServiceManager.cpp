@@ -19,6 +19,7 @@
 
 #include "ServiceManager.h"
 
+#include <QDateTime>
 #include <QTimer>
 
 #include "../../hal/functional/BluetoothManagerImpl.h"
@@ -321,6 +322,12 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
   m_androidAutoControlVersionReceived = false;
   m_androidAutoServiceDiscoveryCompleted = false;
   m_androidAutoConnectedDuringStartup = false;
+  m_androidAutoStartupBeginMs = QDateTime::currentMSecsSinceEpoch();
+  m_androidAutoLastStateChangeMs = m_androidAutoStartupBeginMs;
+  m_androidAutoLastDisconnectMs = 0;
+  m_androidAutoLastStartupRenegotiateMs = 0;
+  m_androidAutoStartupDisconnectCount = 0;
+  m_androidAutoStartupRenegotiateIssued = false;
 
   connect(m_androidAutoService, &AndroidAutoService::projectionStatusChanged, this,
           [this](const QJsonObject& status) {
@@ -334,6 +341,9 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
 
   connect(m_androidAutoService, &AndroidAutoService::connectionStateChanged, this,
           [this](AndroidAutoService::ConnectionState state) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            m_androidAutoLastStateChangeMs = nowMs;
+
             if (state == AndroidAutoService::ConnectionState::CONNECTED) {
               m_androidAutoConnectedDuringStartup = true;
             }
@@ -341,6 +351,11 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
             if (state == AndroidAutoService::ConnectionState::DISCONNECTED ||
                 state == AndroidAutoService::ConnectionState::DISCONNECTING ||
                 state == AndroidAutoService::ConnectionState::ERROR) {
+              if (m_androidAutoStartupBeginMs > 0 &&
+                  (nowMs - m_androidAutoStartupBeginMs) < 120000) {
+                m_androidAutoLastDisconnectMs = nowMs;
+                ++m_androidAutoStartupDisconnectCount;
+              }
               m_androidAutoProjectionReady = false;
               m_androidAutoControlVersionReceived = false;
               m_androidAutoServiceDiscoveryCompleted = false;
@@ -399,6 +414,35 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
                             .toInt())
                  .toInt(),
              60000);
+          const int unstableDisconnectQuietPeriodMs =
+            qBound(2000,
+               device.settings
+                 .value("renegotiate_unstable_disconnect_quiet_period_ms",
+                    ConfigService::instance()
+                      .get(
+                        "core.android_auto.renegotiate_unstable_disconnect_quiet_period_ms",
+                        15000)
+                      .toInt())
+                 .toInt(),
+               120000);
+          const int unstableDisconnectThreshold =
+            qBound(1,
+               device.settings
+                 .value("renegotiate_unstable_disconnect_threshold",
+                    ConfigService::instance()
+                      .get("core.android_auto.renegotiate_unstable_disconnect_threshold", 2)
+                      .toInt())
+                 .toInt(),
+               10);
+          const int startupRenegotiationCooldownMs =
+            qBound(2000,
+               device.settings
+                 .value("renegotiate_startup_cooldown_ms",
+                    ConfigService::instance()
+                      .get("core.android_auto.renegotiate_startup_cooldown_ms", 60000)
+                      .toInt())
+                 .toInt(),
+               180000);
 
   if (forceRenegotiateOnStartup) {
     Logger::instance().info(
@@ -408,8 +452,42 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
             .arg(readinessGraceDelayMs)
             .arg(relaunchDelayMs));
 
-    QTimer::singleShot(renegotiateDelayMs, this, [this, relaunchDelayMs, readinessGraceDelayMs]() {
+    QTimer::singleShot(renegotiateDelayMs, this,
+               [this, relaunchDelayMs, readinessGraceDelayMs,
+              startupRenegotiationCooldownMs, unstableDisconnectThreshold,
+              unstableDisconnectQuietPeriodMs]() {
       if (!m_androidAutoService) {
+        return;
+      }
+
+      const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+      if (m_androidAutoStartupRenegotiateIssued) {
+        Logger::instance().info(
+            "[ServiceManager]      AndroidAuto: startup renegotiation skipped (already issued once)");
+        return;
+      }
+
+      if (m_androidAutoLastStartupRenegotiateMs > 0 &&
+          (nowMs - m_androidAutoLastStartupRenegotiateMs) < startupRenegotiationCooldownMs) {
+        Logger::instance().warning(
+            QString("[ServiceManager]      AndroidAuto: startup renegotiation suppressed "
+                    "(cooldown active, remaining %1 ms)")
+                .arg(startupRenegotiationCooldownMs -
+                     (nowMs - m_androidAutoLastStartupRenegotiateMs)));
+        return;
+      }
+
+      if (m_androidAutoStartupDisconnectCount >= unstableDisconnectThreshold &&
+          m_androidAutoLastDisconnectMs > 0 &&
+          (nowMs - m_androidAutoLastDisconnectMs) < unstableDisconnectQuietPeriodMs) {
+        Logger::instance().warning(
+            QString("[ServiceManager]      AndroidAuto: startup renegotiation suppressed "
+                    "(unstable disconnect churn %1/%2, last disconnect %3 ms ago, quiet period %4 ms)")
+                .arg(m_androidAutoStartupDisconnectCount)
+                .arg(unstableDisconnectThreshold)
+                .arg(nowMs - m_androidAutoLastDisconnectMs)
+                .arg(unstableDisconnectQuietPeriodMs));
         return;
       }
 
@@ -422,6 +500,9 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
         if (!m_androidAutoService) {
           return;
         }
+
+        m_androidAutoStartupRenegotiateIssued = true;
+        m_androidAutoLastStartupRenegotiateMs = QDateTime::currentMSecsSinceEpoch();
 
         Logger::instance().info(
             "[ServiceManager]      AndroidAuto: startup renegotiation step 1/2 -> disconnect");

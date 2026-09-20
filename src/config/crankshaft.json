@@ -2,11 +2,18 @@
   "core": {
     "websocket": {
       "port": 8080,
-      "host": "0.0.0.0"
+      "host": "0.0.0.0",
+      "client_contract": {
+        "require_hello": false,
+        "required_protocol_version": 1,
+        "min_client_major": 0,
+        "require_aa_capability": false
+      }
     },
     "android_auto": {
       "startup_profile": "compat_openauto_profile",
       "compat_openauto_profile": true,
+      "video_transport_mode": "webrtc",
       "logging": {
         "enabled": true,
         "level": "debug",
@@ -35,6 +42,48 @@
         "sensor_enabled": true,
         "bluetooth_enabled": true
       },
+      "video": {
+        "resolution": {
+          "width": 800,
+          "height": 480
+        },
+        "fps": 30,
+        "density": 140,
+        "width_margin": 0,
+        "height_margin": 0
+      },
+      "decode": {
+        "enabled": true,
+        "dynamic_target_enabled": true,
+        "target_depth_nominal_frames": 2,
+        "target_depth_min_frames": 1,
+        "target_depth_max_frames": 4,
+        "soft_cap_frames": 3,
+        "hard_cap_frames": 6,
+        "hysteresis_floor_frames": 2,
+        "admission_control_enabled": true,
+        "admission_throttle_step_pct": 10,
+        "admission_throttle_max_pct": 70,
+        "queue_sample_period_ms": 33
+      },
+      "telemetry": {
+        "enabled": true,
+        "local_only": true,
+        "retention_budget_mb": 100,
+        "trace_buffer_mb": 70,
+        "metrics_buffer_mb": 20,
+        "emergency_snapshot_mb": 10,
+        "burst_on_hard_cap_breach": true,
+        "burst_duration_seconds": 10,
+        "pretrigger_rewind_seconds": 2,
+        "burst_cooldown_seconds": 30,
+        "export_mode": "debug_collector_pull"
+      },
+      "thermal": {
+        "level2_trigger_temp_c": 75,
+        "level2_clear_temp_c": 72,
+        "emergency_decode_throttle_enabled": true
+      },
       "control": {
         "version_request_max_attempts": 10,
         "version_request_recovery_ms": 120000,
@@ -43,7 +92,16 @@
       "force_renegotiate_on_startup": false,
       "renegotiate_on_startup_delay_ms": 12000,
       "renegotiate_readiness_grace_delay_ms": 10000,
-      "renegotiate_relaunch_delay_ms": 2500
+      "renegotiate_relaunch_delay_ms": 2500,
+      "websocket": {
+        "renegotiation_cooldown_ms": 8000,
+        "renegotiation_connected_grace_ms": 20000
+      },
+      "startup": {
+        "renegotiate_disconnect_threshold": 3,
+        "renegotiate_disconnect_window_ms": 15000,
+        "renegotiate_startup_grace_ms": 20000
+      }
     },
     "logging": {
       "level": "info",

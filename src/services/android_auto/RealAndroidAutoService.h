@@ -22,6 +22,7 @@
 #include <QList>
 #include <QSet>
 #include <QThread>
+#include <QElapsedTimer>
 class QTimer;
 #include <boost/asio.hpp>
 #include <memory>
@@ -44,6 +45,7 @@ class AAMicrophoneEventHandler;
 class AABluetoothEventHandler;
 class AAWifiProjectionEventHandler;
 class IWirelessNetworkManager;
+class GStreamerWebRtcBridge;
 
 // Forward declarations for AASDK
 #ifdef CRANKSHAFT_AASDK_OLD_API
@@ -187,6 +189,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   int getFrameDropCount() const override {
     return m_droppedFrames;
   }
+
+  VideoTransportMode getVideoTransportMode() const override {
+    return m_videoTransportMode;
+  }
+  void handleWebRtcSignalingMessage(const QString& topic, const QVariantMap& payload) override;
   int getLatency() const override {
     return m_latency;
   }
@@ -205,6 +212,40 @@ class RealAndroidAutoService : public AndroidAutoService {
     bool inputEnabled{true};
     bool sensorEnabled{true};
     bool bluetoothEnabled{false};
+  };
+
+  struct DecodeControlConfig {
+    bool enabled{true};
+    bool dynamicTargetEnabled{true};
+    int targetDepthNominalFrames{2};
+    int targetDepthMinFrames{1};
+    int targetDepthMaxFrames{4};
+    int softCapFrames{3};
+    int hardCapFrames{6};
+    int hysteresisFloorFrames{2};
+    bool admissionControlEnabled{true};
+    int admissionThrottleStepPct{10};
+    int admissionThrottleMaxPct{70};
+    int queueSamplePeriodMs{33};
+  };
+
+  struct TelemetryConfig {
+    bool enabled{true};
+    bool localOnly{true};
+    int retentionBudgetMb{100};
+    int traceBufferMb{70};
+    int metricsBufferMb{20};
+    int emergencySnapshotMb{10};
+    bool burstOnHardCapBreach{true};
+    int burstDurationSeconds{10};
+    int pretriggerRewindSeconds{2};
+    int burstCooldownSeconds{30};
+  };
+
+  struct ThermalControlConfig {
+    int level2TriggerTempC{75};
+    int level2ClearTempC{72};
+    bool emergencyDecodeThrottleEnabled{true};
   };
 
   void setChannelConfig(const ChannelConfig& config);
@@ -259,6 +300,8 @@ class RealAndroidAutoService : public AndroidAutoService {
   void onChannelError(const QString& channelName, const QString& error);
   void resetProjectionStatus(const QString& reason);
   void publishProjectionStatus(const QString& reason);
+  void setupWebRtcBridge();
+  void teardownWebRtcBridge();
   void ensureProjectionIdleWatchdogTimer();
   void updateProjectionIdleWatchdog(const QString& reason);
   void stopProjectionIdleWatchdog(const QString& reason);
@@ -287,6 +330,11 @@ class RealAndroidAutoService : public AndroidAutoService {
   void armAoapRetryResetWindowIfNeeded();
   void sendControlVersionRequest();
   void performImmediateTransportRecovery(const QString& reason);
+  // Re-arms the receive callbacks on every active AASDK channel without
+  // tearing down the transport. Called after a recoverable USB receive error
+  // to keep the session alive rather than triggering a full disconnect/reconnect
+  // cycle which would cause visible video pipeline disruption (flicker).
+  void rearmActiveReceives();
   void scheduleVideoFocusKickAfterServiceDiscovery();
   void armNonControlReceivesAfterControlReady();
   void armDeferredChannelReceivesAfterServiceDiscovery();
@@ -303,13 +351,30 @@ class RealAndroidAutoService : public AndroidAutoService {
   AndroidDevice m_device;
   QSize m_resolution{1024, 600};
   int m_fps{30};
+  int m_videoDensity{160};
+  int m_videoWidthMargin{0};
+  int m_videoHeightMargin{0};
   bool m_audioEnabled{true};
   ChannelConfig m_channelConfig;
+  DecodeControlConfig m_decodeControlConfig;
+  TelemetryConfig m_telemetryConfig;
+  ThermalControlConfig m_thermalControlConfig;
+  VideoTransportMode m_requestedVideoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
+  VideoTransportMode m_videoTransportMode{VideoTransportMode::WEBSOCKET_JPEG};
+  QString m_videoTransportFallbackReason;
 
   // Session state tracking
   SessionState m_sessionState{SessionState::ENDED};
   QString m_currentSessionId;
   QString m_currentDeviceId;
+
+  // m_resolution: UI display size — used ONLY for touch coordinate scaling.
+  //   Set by the UI via WebSocket "android-auto/display/resolution".
+  //   Has NO effect on the phone's H.264 stream or GStreamer pipeline.
+  // m_negotiatedVideoResolution: stream/decoder resolution — negotiated with
+  //   the phone at service-discovery time and used for GStreamer decoder init.
+  //   Set once from config via negotiatedVideoResolution() at session setup.
+  QSize m_negotiatedVideoResolution{1920, 1080};
   SessionStore* m_sessionStore{nullptr};
   QTimer* m_heartbeatTimer{nullptr};
   EventBus* m_eventBus{nullptr};
@@ -320,9 +385,18 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_latency{0};
   quint64 m_videoChannelUpdateCount{0};
   quint64 m_videoPayloadCount{0};
+  quint64 m_videoEncodedEmitCount{0};
+  QElapsedTimer m_lastVideoEncodedEmitTimer;
+  quint64 m_touchInputCount{0};
+
   quint64 m_videoDecodeSubmitCount{0};
   quint64 m_videoDecodeRejectCount{0};
   quint64 m_videoDecodedFrameCount{0};
+  int m_videoDecodeBacklogEstimate{0};
+  quint64 m_decodeHardCapBreachCount{0};
+  quint64 m_decodeSoftCapHitCount{0};
+  qint64 m_lastDecodeHardCapBreachMs{0};
+  qint64 m_lastTelemetryBurstCaptureMs{0};
   quint64 m_mediaAudioUpdateCount{0};
   quint64 m_mediaAudioPayloadCount{0};
   quint64 m_mediaAudioMixCount{0};
@@ -355,6 +429,7 @@ class RealAndroidAutoService : public AndroidAutoService {
   bool m_audioPayloadSeen{false};
   bool m_lastProjectionReady{false};
   bool m_aasdkTeardownInProgress{false};
+  std::unique_ptr<GStreamerWebRtcBridge> m_webRtcBridge;
   QTimer* m_projectionIdleWatchdogTimer{nullptr};
   qint64 m_projectionIdleWatchdogStartedMs{0};
   int m_projectionIdleWatchdogTickCount{0};
@@ -363,12 +438,20 @@ class RealAndroidAutoService : public AndroidAutoService {
   int m_projectionIdleRecoveryCount{0};
   int m_projectionStreamNudgeCount{0};
   qint64 m_projectionStreamLastNudgeMs{0};
+  // Tracks non-control channel errors that happen before control/service
+  // discovery completes so startup can tolerate transient races without
+  // immediately tearing down the whole connection.
+  int m_preHandshakeNonControlChannelErrorCount{0};
+  qint64 m_preHandshakeNonControlChannelErrorWindowStartMs{0};
   // Epoch counter increments for each logical stream-nudge attempt
   int m_projectionStreamNudgeEpoch{0};
   // Last epoch that was counted towards the pre-start consecutive timeout counter
   int m_preStartNudgeLastCountedEpoch{0};
   int m_preStartNudgeNative2ConsecutiveTimeouts{0};
   int m_postDiscoveryNoDeviceGraceRecoveryCount{0};
+  // Total number of times rearmActiveReceives() has fired; useful for
+  // correlating log entries during USB disconnect/reconnect investigations.
+  int m_rearmActiveReceivesCount{0};
   QTimer* m_controlPingTimer{nullptr};
   QSet<QString> m_channelReceiveArmTraceKeys;
 

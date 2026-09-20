@@ -21,6 +21,7 @@
 
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonParseError>
 #include <QJsonObject>
 
 #include "../logging/Logger.h"
@@ -31,17 +32,36 @@ ConfigService& ConfigService::instance() {
 }
 
 bool ConfigService::load(const QString& filePath) {
+  m_lastLoadError.clear();
+
   QFile file(filePath);
   if (!file.open(QIODevice::ReadOnly)) {
-    Logger::instance().error(QString("Failed to open config file: %1").arg(filePath));
+    m_lastLoadError =
+        QString("open failed: %1").arg(file.errorString().isEmpty() ? QStringLiteral("unknown")
+                                                                      : file.errorString());
+    Logger::instance().error(
+        QString("Failed to open config file: %1 (%2)").arg(filePath, m_lastLoadError));
     return false;
   }
 
-  QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  const QByteArray rawJson = file.readAll();
   file.close();
 
+  QJsonParseError parseError;
+  QJsonDocument doc = QJsonDocument::fromJson(rawJson, &parseError);
+  if (parseError.error != QJsonParseError::NoError) {
+    m_lastLoadError = QString("json parse error at byte %1: %2")
+                          .arg(parseError.offset)
+                          .arg(parseError.errorString());
+    Logger::instance().error(
+        QString("Invalid config file format: %1 (%2)").arg(filePath, m_lastLoadError));
+    return false;
+  }
+
   if (!doc.isObject()) {
-    Logger::instance().error("Invalid config file format");
+    m_lastLoadError = QStringLiteral("root element is not a JSON object");
+    Logger::instance().error(
+        QString("Invalid config file format: %1 (%2)").arg(filePath, m_lastLoadError));
     return false;
   }
 
@@ -71,6 +91,10 @@ bool ConfigService::save(const QString& filePath) {
 
 auto ConfigService::loadedFilePath() const -> QString {
   return m_loadedFilePath;
+}
+
+auto ConfigService::lastLoadError() const -> QString {
+  return m_lastLoadError;
 }
 
 QVariant ConfigService::get(const QString& key, const QVariant& defaultValue) const {

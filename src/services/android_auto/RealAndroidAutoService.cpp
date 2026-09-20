@@ -17,6 +17,7 @@
  *  along with Crankshaft. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AasdkErrorClassification.h"
 #include "RealAndroidAutoService.h"
 
 #include <QDateTime>
@@ -36,6 +37,7 @@
 
 #include "../../hal/multimedia/AudioMixer.h"
 #include "../../hal/multimedia/GStreamerVideoDecoder.h"
+#include "../../hal/multimedia/GStreamerWebRtcBridge.h"
 #include "../audio/AudioRouter.h"
 #include "../config/ConfigService.h"
 #include "../eventbus/EventBus.h"
@@ -266,6 +268,47 @@ static int getBoundedConfigValue(const QString& key, int defaultValue, int minVa
   return std::clamp(configuredValue, minValue, maxValue);
 }
 
+static auto resolveBoundedIntSetting(const QMap<QString, QVariant>& settings,
+                                     const QString& deviceSettingKey,
+                                     const QString& serviceConfigKey,
+                                     const QString& legacyServiceConfigKey, int defaultValue,
+                                     int minValue, int maxValue) -> int {
+  bool ok = false;
+  if (settings.contains(deviceSettingKey)) {
+    const int value = settings.value(deviceSettingKey).toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  const QVariant serviceValue = ConfigService::instance().get(serviceConfigKey, QVariant());
+  if (serviceValue.isValid()) {
+    const int value = serviceValue.toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  const QVariant legacyServiceValue =
+      ConfigService::instance().get(legacyServiceConfigKey, QVariant());
+  if (legacyServiceValue.isValid()) {
+    const int value = legacyServiceValue.toInt(&ok);
+    if (ok) {
+      return std::clamp(value, minValue, maxValue);
+    }
+  }
+
+  return defaultValue;
+}
+
+struct AAVideoAdvertisementConfig {
+  QSize resolution;
+  int fps;
+  int density;
+  int widthMargin;
+  int heightMargin;
+};
+
 enum class AAStartupProfile {
   Resilient,
   CompatOpenAuto,
@@ -364,6 +407,51 @@ static auto isProjectionIdleReconnectEnabled() -> bool {
       .get("core.android_auto.projection.idle_reconnect_enabled", true)
       .toBool();
 }
+
+  static auto resolveVideoAdvertisementConfig(const QMap<QString, QVariant>& settings)
+    -> AAVideoAdvertisementConfig {
+    const bool compatOpenAutoProfile = isCompatOpenAutoProfileEnabled();
+
+    const int defaultWidth = compatOpenAutoProfile ? 800 : 1024;
+    const int defaultHeight = compatOpenAutoProfile ? 480 : 600;
+    const int defaultFps = 30;
+    const int defaultDensity = compatOpenAutoProfile ? 140 : 160;
+
+    AAVideoAdvertisementConfig resolved;
+    resolved.resolution.setWidth(resolveBoundedIntSetting(
+      settings, "video.resolution.width", "core.services.android_auto.video.resolution.width",
+      "core.android_auto.video.resolution.width", defaultWidth, 640, 3840));
+    resolved.resolution.setHeight(resolveBoundedIntSetting(
+      settings, "video.resolution.height", "core.services.android_auto.video.resolution.height",
+      "core.android_auto.video.resolution.height", defaultHeight, 360, 2160));
+    resolved.fps = resolveBoundedIntSetting(settings, "video.fps",
+                        "core.services.android_auto.video.fps",
+                        "core.android_auto.video.fps", defaultFps, 30, 60);
+    resolved.density = resolveBoundedIntSetting(settings, "video.density",
+                          "core.services.android_auto.video.density",
+                          "core.android_auto.video.density", defaultDensity,
+                          80, 640);
+    resolved.widthMargin = resolveBoundedIntSetting(settings, "video.width_margin",
+                            "core.services.android_auto.video.width_margin",
+                            "core.android_auto.video.width_margin", 0, 0,
+                            1000);
+    resolved.heightMargin = resolveBoundedIntSetting(
+      settings, "video.height_margin", "core.services.android_auto.video.height_margin",
+      "core.android_auto.video.height_margin", 0, 0, 1000);
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Resolved AA video config: resolution=%1x%2 fps=%3 "
+          "density=%4 width_margin=%5 height_margin=%6 startup_profile=%7")
+        .arg(resolved.resolution.width())
+        .arg(resolved.resolution.height())
+        .arg(resolved.fps)
+        .arg(resolved.density)
+        .arg(resolved.widthMargin)
+        .arg(resolved.heightMargin)
+        .arg(aaStartupProfileToString(resolveAAStartupProfile())));
+
+    return resolved;
+  }
 
 static auto parseLoggerLevel(const QString& value, bool* valid = nullptr) -> Logger::Level {
   const QString normalised = value.trimmed().toLower();
@@ -474,6 +562,188 @@ static auto resolveSettingBool(const QMap<QString, QVariant>& settings,
 
   return defaultValue;
 }
+
+  static auto resolveDecodeControlConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::DecodeControlConfig {
+    RealAndroidAutoService::DecodeControlConfig cfg;
+
+    cfg.enabled = resolveSettingBool(
+      settings, "decode.enabled", "core.services.android_auto.decode.enabled",
+      "core.android_auto.decode.enabled", cfg.enabled);
+    cfg.dynamicTargetEnabled =
+      resolveSettingBool(settings, "decode.dynamic_target_enabled",
+               "core.services.android_auto.decode.dynamic_target_enabled",
+               "core.android_auto.decode.dynamic_target_enabled", cfg.dynamicTargetEnabled);
+
+    cfg.targetDepthNominalFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_nominal_frames",
+                   "core.services.android_auto.decode.target_depth_nominal_frames",
+                   "core.android_auto.decode.target_depth_nominal_frames",
+                   cfg.targetDepthNominalFrames, 1, 8);
+    cfg.targetDepthMinFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_min_frames",
+                   "core.services.android_auto.decode.target_depth_min_frames",
+                   "core.android_auto.decode.target_depth_min_frames",
+                   cfg.targetDepthMinFrames, 1, 8);
+    cfg.targetDepthMaxFrames =
+      resolveBoundedIntSetting(settings, "decode.target_depth_max_frames",
+                   "core.services.android_auto.decode.target_depth_max_frames",
+                   "core.android_auto.decode.target_depth_max_frames",
+                   cfg.targetDepthMaxFrames, 1, 12);
+    cfg.softCapFrames =
+      resolveBoundedIntSetting(settings, "decode.soft_cap_frames",
+                   "core.services.android_auto.decode.soft_cap_frames",
+                   "core.android_auto.decode.soft_cap_frames", cfg.softCapFrames, 1, 12);
+    cfg.hardCapFrames =
+      resolveBoundedIntSetting(settings, "decode.hard_cap_frames",
+                   "core.services.android_auto.decode.hard_cap_frames",
+                   "core.android_auto.decode.hard_cap_frames", cfg.hardCapFrames, 1, 12);
+    cfg.hysteresisFloorFrames =
+      resolveBoundedIntSetting(settings, "decode.hysteresis_floor_frames",
+                   "core.services.android_auto.decode.hysteresis_floor_frames",
+                   "core.android_auto.decode.hysteresis_floor_frames",
+                   cfg.hysteresisFloorFrames, 0, 10);
+    cfg.admissionControlEnabled =
+      resolveSettingBool(settings, "decode.admission_control_enabled",
+               "core.services.android_auto.decode.admission_control_enabled",
+               "core.android_auto.decode.admission_control_enabled",
+               cfg.admissionControlEnabled);
+    cfg.admissionThrottleStepPct =
+      resolveBoundedIntSetting(settings, "decode.admission_throttle_step_pct",
+                   "core.services.android_auto.decode.admission_throttle_step_pct",
+                   "core.android_auto.decode.admission_throttle_step_pct",
+                   cfg.admissionThrottleStepPct, 1, 90);
+    cfg.admissionThrottleMaxPct =
+      resolveBoundedIntSetting(settings, "decode.admission_throttle_max_pct",
+                   "core.services.android_auto.decode.admission_throttle_max_pct",
+                   "core.android_auto.decode.admission_throttle_max_pct",
+                   cfg.admissionThrottleMaxPct, 1, 95);
+    cfg.queueSamplePeriodMs =
+      resolveBoundedIntSetting(settings, "decode.queue_sample_period_ms",
+                   "core.services.android_auto.decode.queue_sample_period_ms",
+                   "core.android_auto.decode.queue_sample_period_ms",
+                   cfg.queueSamplePeriodMs, 10, 1000);
+
+    if (cfg.softCapFrames >= cfg.hardCapFrames) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] decode caps invalid (soft=%1 hard=%2), forcing hard=soft+1")
+        .arg(cfg.softCapFrames)
+        .arg(cfg.hardCapFrames));
+    cfg.hardCapFrames = std::min(12, cfg.softCapFrames + 1);
+    }
+
+    if (cfg.hysteresisFloorFrames >= cfg.softCapFrames) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] decode hysteresis invalid (floor=%1 soft=%2), forcing floor=soft-1")
+        .arg(cfg.hysteresisFloorFrames)
+        .arg(cfg.softCapFrames));
+    cfg.hysteresisFloorFrames = std::max(0, cfg.softCapFrames - 1);
+    }
+
+    if (cfg.targetDepthMinFrames > cfg.targetDepthMaxFrames) {
+    std::swap(cfg.targetDepthMinFrames, cfg.targetDepthMaxFrames);
+    }
+    cfg.targetDepthNominalFrames =
+      std::clamp(cfg.targetDepthNominalFrames, cfg.targetDepthMinFrames, cfg.targetDepthMaxFrames);
+
+    if (cfg.admissionThrottleStepPct > cfg.admissionThrottleMaxPct) {
+    cfg.admissionThrottleStepPct = cfg.admissionThrottleMaxPct;
+    }
+
+    return cfg;
+  }
+
+  static auto resolveTelemetryConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::TelemetryConfig {
+    RealAndroidAutoService::TelemetryConfig cfg;
+
+    cfg.enabled = resolveSettingBool(
+      settings, "telemetry.enabled", "core.services.android_auto.telemetry.enabled",
+      "core.android_auto.telemetry.enabled", cfg.enabled);
+    cfg.localOnly = resolveSettingBool(
+      settings, "telemetry.local_only", "core.services.android_auto.telemetry.local_only",
+      "core.android_auto.telemetry.local_only", cfg.localOnly);
+    cfg.retentionBudgetMb =
+      resolveBoundedIntSetting(settings, "telemetry.retention_budget_mb",
+                   "core.services.android_auto.telemetry.retention_budget_mb",
+                   "core.android_auto.telemetry.retention_budget_mb",
+                   cfg.retentionBudgetMb, 10, 1024);
+    cfg.traceBufferMb =
+      resolveBoundedIntSetting(settings, "telemetry.trace_buffer_mb",
+                   "core.services.android_auto.telemetry.trace_buffer_mb",
+                   "core.android_auto.telemetry.trace_buffer_mb", cfg.traceBufferMb,
+                   1, 1024);
+    cfg.metricsBufferMb =
+      resolveBoundedIntSetting(settings, "telemetry.metrics_buffer_mb",
+                   "core.services.android_auto.telemetry.metrics_buffer_mb",
+                   "core.android_auto.telemetry.metrics_buffer_mb",
+                   cfg.metricsBufferMb, 1, 1024);
+    cfg.emergencySnapshotMb =
+      resolveBoundedIntSetting(settings, "telemetry.emergency_snapshot_mb",
+                   "core.services.android_auto.telemetry.emergency_snapshot_mb",
+                   "core.android_auto.telemetry.emergency_snapshot_mb",
+                   cfg.emergencySnapshotMb, 1, 1024);
+    cfg.burstOnHardCapBreach =
+      resolveSettingBool(settings, "telemetry.burst_on_hard_cap_breach",
+               "core.services.android_auto.telemetry.burst_on_hard_cap_breach",
+               "core.android_auto.telemetry.burst_on_hard_cap_breach",
+               cfg.burstOnHardCapBreach);
+    cfg.burstDurationSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.burst_duration_seconds",
+                   "core.services.android_auto.telemetry.burst_duration_seconds",
+                   "core.android_auto.telemetry.burst_duration_seconds",
+                   cfg.burstDurationSeconds, 1, 300);
+    cfg.pretriggerRewindSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.pretrigger_rewind_seconds",
+                   "core.services.android_auto.telemetry.pretrigger_rewind_seconds",
+                   "core.android_auto.telemetry.pretrigger_rewind_seconds",
+                   cfg.pretriggerRewindSeconds, 0, 60);
+    cfg.burstCooldownSeconds =
+      resolveBoundedIntSetting(settings, "telemetry.burst_cooldown_seconds",
+                   "core.services.android_auto.telemetry.burst_cooldown_seconds",
+                   "core.android_auto.telemetry.burst_cooldown_seconds",
+                   cfg.burstCooldownSeconds, 1, 3600);
+
+    const int partitionTotal = cfg.traceBufferMb + cfg.metricsBufferMb + cfg.emergencySnapshotMb;
+    if (partitionTotal != cfg.retentionBudgetMb) {
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] telemetry partition total (%1MB) != retention budget (%2MB)")
+        .arg(partitionTotal)
+        .arg(cfg.retentionBudgetMb));
+    }
+
+    return cfg;
+  }
+
+  static auto resolveThermalControlConfig(const QMap<QString, QVariant>& settings)
+    -> RealAndroidAutoService::ThermalControlConfig {
+    RealAndroidAutoService::ThermalControlConfig cfg;
+
+    cfg.level2TriggerTempC =
+      resolveBoundedIntSetting(settings, "thermal.level2_trigger_temp_c",
+                   "core.services.android_auto.thermal.level2_trigger_temp_c",
+                   "core.android_auto.thermal.level2_trigger_temp_c",
+                   cfg.level2TriggerTempC, 45, 95);
+    cfg.level2ClearTempC =
+      resolveBoundedIntSetting(settings, "thermal.level2_clear_temp_c",
+                   "core.services.android_auto.thermal.level2_clear_temp_c",
+                   "core.android_auto.thermal.level2_clear_temp_c", cfg.level2ClearTempC,
+                   40, 90);
+    cfg.emergencyDecodeThrottleEnabled =
+      resolveSettingBool(settings, "thermal.emergency_decode_throttle_enabled",
+               "core.services.android_auto.thermal.emergency_decode_throttle_enabled",
+               "core.android_auto.thermal.emergency_decode_throttle_enabled",
+               cfg.emergencyDecodeThrottleEnabled);
+
+    if (cfg.level2ClearTempC >= cfg.level2TriggerTempC) {
+    cfg.level2ClearTempC = std::max(40, cfg.level2TriggerTempC - 3);
+    Logger::instance().warning(
+      QString("[RealAndroidAutoService] thermal clear threshold adjusted below trigger (%1C)")
+        .arg(cfg.level2ClearTempC));
+    }
+
+    return cfg;
+  }
 
 static void applyAndroidAutoLoggingConfig(const QMap<QString, QVariant>& settings) {
   const bool loggingEnabled =
@@ -643,6 +913,33 @@ static auto selectVideoResolution(const QSize& resolution)
   return ResolutionType::VIDEO_800x480;
 }
 
+// Returns the resolution to negotiate with the phone and use as the GStreamer
+// decoder output size.  This is intentionally independent of m_resolution
+// (the UI display size used only for touch coordinate scaling).
+//
+// We tell the phone a fixed preferred stream resolution at service discovery
+// time, before the UI has sent a display-resolution update.  Using m_resolution
+// for this caused the phone to receive VIDEO_800x480 (from the default
+// 1024x600 display size) and the decoder to initialise at the wrong size.
+// When the first IDR frame arrived at the negotiated resolution, GStreamer
+// had to renegotiate caps, producing a brief blank frame / HDMI flicker.
+//
+// The correct pattern is:
+//   negotiatedVideoResolution() -> phone negotiation + GStreamer decoder init
+//   m_resolution               -> touch coordinate scaling only
+//
+// The QML projection Image uses fillMode: PreserveAspectFit and scales the
+// decoded frames to fit the actual display, so the stream resolution and the
+// physical display resolution are fully decoupled.
+static auto negotiatedVideoResolution() -> QSize {
+  // Allow override via config; fall back to 1080p.
+  const int w = getBoundedConfigValue(
+      QStringLiteral("core.android_auto.video.negotiated_width"), 1280, 480, 1920);
+  const int h = getBoundedConfigValue(
+      QStringLiteral("core.android_auto.video.negotiated_height"), 720, 270, 1080);
+  return QSize(w, h);
+}
+
 static auto selectVideoFrameRate(int fps)
     -> aap_protobuf::service::media::sink::message::VideoFrameRateType {
   using FrameRateType = aap_protobuf::service::media::sink::message::VideoFrameRateType;
@@ -652,10 +949,23 @@ static auto selectVideoFrameRate(int fps)
 static void appendVideoSinkFeature(
     aap_protobuf::service::control::message::ServiceDiscoveryResponse& response,
     const std::shared_ptr<aasdk::channel::mediasink::video::channel::VideoChannel>& videoChannel,
-    const QSize& resolution, int fps) {
+    const QSize& resolution, int fps, int density, int widthMargin, int heightMargin) {
   if (!videoChannel) {
     return;
   }
+
+  Q_UNUSED(resolution);
+
+  // Use the negotiated stream resolution, not the UI display resolution.
+  // The phone encodes at this resolution; GStreamer decodes at this resolution.
+  // The QML Image scales the output to fit the physical display.
+  const QSize streamResolution = negotiatedVideoResolution();
+
+  const int configuredDensity =
+      density > 0
+          ? density
+          : getBoundedConfigValue(QStringLiteral("core.android_auto.video.density_dpi"), 160,
+                                  120, 640);
 
   auto* service = response.add_channels();
   service->set_id(static_cast<uint32_t>(videoChannel->getId()));
@@ -666,11 +976,11 @@ static void appendVideoSinkFeature(
   mediaSink->set_available_while_in_call(true);
 
   auto* videoConfig = mediaSink->add_video_configs();
-  videoConfig->set_codec_resolution(selectVideoResolution(resolution));
+  videoConfig->set_codec_resolution(selectVideoResolution(streamResolution));
   videoConfig->set_frame_rate(selectVideoFrameRate(fps));
-  videoConfig->set_width_margin(0);
-  videoConfig->set_height_margin(0);
-  videoConfig->set_density(160);
+  videoConfig->set_width_margin(static_cast<uint32_t>(std::max(0, widthMargin)));
+  videoConfig->set_height_margin(static_cast<uint32_t>(std::max(0, heightMargin)));
+  videoConfig->set_density(static_cast<uint32_t>(std::max(80, configuredDensity)));
 }
 
 static void appendAudioSinkFeature(
@@ -745,6 +1055,8 @@ static void appendInputSourceFeature(
   auto* touchscreen = inputService->add_touchscreen();
   touchscreen->set_width(static_cast<uint32_t>(resolution.width()));
   touchscreen->set_height(static_cast<uint32_t>(resolution.height()));
+  touchscreen->set_type(
+      aap_protobuf::service::inputsource::message::TouchScreenType::CAPACITIVE);
 }
 
 static void appendSensorSourceFeature(
@@ -828,54 +1140,56 @@ static auto isRecoverableUsbTransferTimeout(const aasdk::error::Error& error) ->
 static auto isRecoverableUsbReceiveError(const aasdk::error::Error& error) -> bool {
   static constexpr uint32_t kLibusbTransferError = 1;
   static constexpr uint32_t kLibusbTransferTimedOut = 2;
+  static constexpr uint32_t kLibusbTransferNoDevice = 5;
   static constexpr uint32_t kLibusbTransferInterrupted = 4294967292u;  // -4
   return error.getCode() == aasdk::error::ErrorCode::USB_TRANSFER &&
          (error.getNativeCode() == kLibusbTransferError ||
           error.getNativeCode() == kLibusbTransferTimedOut ||
+          error.getNativeCode() == kLibusbTransferNoDevice ||
           error.getNativeCode() == kLibusbTransferInterrupted);
+}
+
+static auto isRecoverableMessengerIntertwinedChannelError(const aasdk::error::Error& error)
+    -> bool {
+  return error.getCode() == aasdk::error::ErrorCode::MESSENGER_INTERTWINED_CHANNELS;
 }
 
 static auto isOperationInProgressError(const aasdk::error::Error& error) -> bool {
   return error.getCode() == aasdk::error::ErrorCode::OPERATION_IN_PROGRESS;
 }
 
+// Returns true when the AASDK error string represents a USB transfer error
+// with the given libusb native code (e.g. LIBUSB_TRANSFER_NO_DEVICE == 5).
 static auto isUsbTransferErrorText(const QString& errorText, uint32_t nativeCode) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 10")) &&
-         errorText.contains(QStringLiteral("Native Code: %1").arg(nativeCode));
+  return crankshaft::aasdk_error_classification::isUsbTransferErrorText(errorText, nativeCode);
+}
+
+// Returns true for USB receive errors that are transient and safe to recover
+// from via a receive re-arm rather than a full transport teardown.
+// Covers: LIBUSB_TRANSFER_ERROR (1), LIBUSB_TRANSFER_TIMED_OUT (2),
+//         LIBUSB_TRANSFER_NO_DEVICE (5), and LIBUSB_TRANSFER_CANCELLED (-4 / 0xFFFFFFFC).
+static auto isRecoverableUsbReceiveErrorText(const QString& errorText) -> bool {
+  return crankshaft::aasdk_error_classification::isRecoverableUsbReceiveErrorText(errorText);
 }
 
 static auto isUsbTransferTimeoutErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kLibusbTransferTimedOut = 2;
-  return isUsbTransferErrorText(errorText, kLibusbTransferTimedOut);
+  return crankshaft::aasdk_error_classification::isUsbTransferTimeoutErrorText(errorText);
 }
 
 static auto isUsbTransferNoDeviceErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kLibusbTransferNoDevice = 5;
-  return isUsbTransferErrorText(errorText, kLibusbTransferNoDevice);
+  return crankshaft::aasdk_error_classification::isUsbTransferNoDeviceErrorText(errorText);
 }
 
 static auto isTransportNoDeviceErrorText(const QString& errorText) -> bool {
-  static constexpr uint32_t kNativeNoDevice = 5;
-
-  if (!errorText.contains(QStringLiteral("Native Code: %1").arg(kNativeNoDevice))) {
-    return false;
-  }
-
-  return errorText.contains(QStringLiteral("AASDK Error: 10")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 25")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 26")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 27")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 28")) ||
-         errorText.contains(QStringLiteral("AASDK Error: 33"));
+  return crankshaft::aasdk_error_classification::isTransportNoDeviceErrorText(errorText);
 }
 
 static auto isSslWrapperNoDeviceErrorText(const QString& errorText) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 25")) &&
-         errorText.contains(QStringLiteral("Native Code: 5"));
+  return crankshaft::aasdk_error_classification::isSslWrapperNoDeviceErrorText(errorText);
 }
 
 static auto isOperationAbortedErrorText(const QString& errorText) -> bool {
-  return errorText.contains(QStringLiteral("AASDK Error: 30"));
+  return crankshaft::aasdk_error_classification::isOperationAbortedErrorText(errorText);
 }
 
 // Helper: perform USBDEVFS_RESET ioctl on a device node
@@ -1333,7 +1647,8 @@ class AAControlEventHandler final
     headUnitInfo->set_head_unit_software_version("1.0");
 
     appendVideoSinkFeature(response, m_service->m_videoChannel, m_service->m_resolution,
-                           m_service->m_fps);
+                 m_service->m_fps, m_service->m_videoDensity,
+                 m_service->m_videoWidthMargin, m_service->m_videoHeightMargin);
     appendAudioSinkFeature(response, m_service->m_mediaAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_MEDIA, 48000,
                            2);
@@ -1346,7 +1661,22 @@ class AAControlEventHandler final
     appendAudioSinkFeature(response, m_service->m_telephonyAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_TELEPHONY,
                            16000, 1);
-    appendInputSourceFeature(response, m_service->m_inputChannel, m_service->m_resolution);
+    // The phone's touchscreen coordinate space must match the resolution
+    // advertised by the VIDEO_SINK. In this implementation that is m_resolution,
+    // which is published by the UI before service discovery. The decoder may
+    // render the received stream at a smaller QImage/QVideoSink size, but that
+    // renderer size is not the AA input coordinate space.
+    // The video service advertises m_resolution, which is the UI-published
+    // projection/display coordinate space. The phone uses that same coordinate
+    // space for touchscreen input. Do not use the decoder's negotiated stream
+    // size here: the decoder may receive 1280x720 while rendering/scaling to
+    // the physical UI surface, and those are separate implementation details.
+    appendInputSourceFeature(response, m_service->m_inputChannel,
+                             m_service->m_resolution);
+    aaLogInfo("control",
+              QString("Advertising AA touchscreen geometry: %1x%2 type=CAPACITIVE")
+                  .arg(m_service->m_resolution.width())
+                  .arg(m_service->m_resolution.height()));
     appendSensorSourceFeature(response, m_service->m_sensorChannel);
     appendBluetoothFeature(response, m_service->m_bluetoothChannel);
     appendWifiProjectionFeature(response, m_service->m_wifiProjectionChannel,
@@ -1514,7 +1844,7 @@ class AAControlEventHandler final
     m_service->traceControlEvent(QStringLiteral("control_handler_error"),
                                  formatAasdkErrorDetails(e));
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=control recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -1736,7 +2066,7 @@ class AAVideoEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=video recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2001,7 +2331,7 @@ class AAAudioEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=%1 recoverable receive error (code=%2 native=%3), "
                          "scheduling receive re-arm")
@@ -2104,7 +2434,7 @@ class AAInputEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=input recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2185,7 +2515,7 @@ class AASensorEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=sensor recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2344,7 +2674,7 @@ class AAMicrophoneEventHandler final
       return;
     }
 
-    if (isRecoverableUsbReceiveError(e)) {
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
       aaLogDebug("channelError",
                  QString("channel=microphone recoverable receive error (code=%1 native=%2), "
                          "scheduling receive re-arm")
@@ -2443,6 +2773,23 @@ class AABluetoothEventHandler final
       return;
     }
 
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=bluetooth recoverable receive error (code=%1 native=%2), "
+                         "scheduling receive re-arm")
+                     .arg(static_cast<int>(e.getCode()))
+                     .arg(e.getNativeCode()));
+      auto self = shared_from_this();
+      QTimer::singleShot(120, m_service, [self]() { self->armReceive(); });
+      return;
+    }
+
+    if (isOperationInProgressError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=bluetooth operation-in-progress, keeping current receive"));
+      return;
+    }
+
     m_service->onChannelError(QStringLiteral("bluetooth"), QString::fromStdString(e.what()));
   }
 
@@ -2532,6 +2879,23 @@ class AAWifiProjectionEventHandler final
       return;
     }
 
+    if (isRecoverableUsbReceiveError(e) || isRecoverableMessengerIntertwinedChannelError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=wifiProjection recoverable receive error (code=%1 native=%2), "
+                         "scheduling receive re-arm")
+                     .arg(static_cast<int>(e.getCode()))
+                     .arg(e.getNativeCode()));
+      auto self = shared_from_this();
+      QTimer::singleShot(120, m_service, [self]() { self->armReceive(); });
+      return;
+    }
+
+    if (isOperationInProgressError(e)) {
+      aaLogDebug("channelError",
+                 QString("channel=wifiProjection operation-in-progress, keeping current receive"));
+      return;
+    }
+
     m_service->onChannelError(QStringLiteral("wifiProjection"), QString::fromStdString(e.what()));
   }
 
@@ -2603,9 +2967,99 @@ void RealAndroidAutoService::setWirelessNetworkManager(
 void RealAndroidAutoService::configureTransport(const QMap<QString, QVariant>& settings) {
   applyAndroidAutoLoggingConfig(settings);
   setChannelConfig(resolveAndroidAutoChannelConfig(settings, m_channelConfig));
+  m_decodeControlConfig = resolveDecodeControlConfig(settings);
+  m_telemetryConfig = resolveTelemetryConfig(settings);
+  m_thermalControlConfig = resolveThermalControlConfig(settings);
+
+  const AAVideoAdvertisementConfig videoConfig = resolveVideoAdvertisementConfig(settings);
+  m_resolution = videoConfig.resolution;
+  // The negotiated video resolution is also the Android Auto touch coordinate
+  // space.  Initialise it here for every transport, including WEBSOCKET_H264.
+  // Previously it was only assigned in the TCP decoder setup path, leaving the
+  // WebSocket H.264 path at the stale 1920x1080 member default.
+  m_negotiatedVideoResolution = videoConfig.resolution;
+  m_fps = videoConfig.fps;
+  m_videoDensity = videoConfig.density;
+  m_videoWidthMargin = videoConfig.widthMargin;
+  m_videoHeightMargin = videoConfig.heightMargin;
+
+  const QString forcedVideoTransportMode =
+      resolveSettingString(settings,
+                           QStringLiteral("video_transport_mode"),
+                           QStringLiteral("core.services.android_auto.video_transport_mode"),
+                           QStringLiteral("core.android_auto.video_transport_mode"),
+                           QStringLiteral("video_transport_mode"),
+                           QString());
+
+  const QString profileVideoTransportMode =
+      settings
+          .value(QStringLiteral("video_transport_mode"),
+                 settings.value(QStringLiteral("video.transport_mode"),
+                                settings.value(QStringLiteral("android_auto.video_transport_mode"),
+                                               QVariant())))
+          .toString()
+          .trimmed();
+
+  const QString requestedVideoTransportMode =
+      !forcedVideoTransportMode.isEmpty()
+          ? forcedVideoTransportMode
+          : (!profileVideoTransportMode.isEmpty() ? profileVideoTransportMode
+                                                  : QStringLiteral("webrtc"));
+
+  m_requestedVideoTransportMode =
+        AndroidAutoService::videoTransportModeFromString(requestedVideoTransportMode);
+  m_videoTransportMode = m_requestedVideoTransportMode;
+  m_videoTransportFallbackReason.clear();
+
+  if (!forcedVideoTransportMode.isEmpty() &&
+      !profileVideoTransportMode.isEmpty() &&
+      forcedVideoTransportMode.compare(profileVideoTransportMode, Qt::CaseInsensitive) != 0) {
+    Logger::instance().info(
+        QString("[RealAndroidAutoService] Overriding profile transport mode '%1' with configured mode '%2'")
+            .arg(profileVideoTransportMode)
+            .arg(forcedVideoTransportMode));
+  }
+  Logger::instance().info(QString("[RealAndroidAutoService] Configured video transport mode: %1")
+                              .arg(AndroidAutoService::videoTransportModeToString(m_videoTransportMode)));
 
   Logger::instance().info(QString("[RealAndroidAutoService] Resolved startup profile: %1")
                               .arg(aaStartupProfileToString(resolveAAStartupProfile())));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Decode control config: enabled=%1 dynamic=%2 target=%3[%4..%5] caps=%6/%7 hysteresis=%8 throttle_step=%9%% throttle_max=%10%% sample_ms=%11")
+        .arg(m_decodeControlConfig.enabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_decodeControlConfig.dynamicTargetEnabled ? QStringLiteral("true")
+                                : QStringLiteral("false"))
+        .arg(m_decodeControlConfig.targetDepthNominalFrames)
+        .arg(m_decodeControlConfig.targetDepthMinFrames)
+        .arg(m_decodeControlConfig.targetDepthMaxFrames)
+        .arg(m_decodeControlConfig.softCapFrames)
+        .arg(m_decodeControlConfig.hardCapFrames)
+        .arg(m_decodeControlConfig.hysteresisFloorFrames)
+        .arg(m_decodeControlConfig.admissionThrottleStepPct)
+        .arg(m_decodeControlConfig.admissionThrottleMaxPct)
+        .arg(m_decodeControlConfig.queueSamplePeriodMs));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Telemetry config: enabled=%1 local_only=%2 retention_mb=%3 partition(trace=%4,metrics=%5,snapshot=%6) burst=%7 duration_s=%8 pretrigger_s=%9 cooldown_s=%10")
+        .arg(m_telemetryConfig.enabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_telemetryConfig.localOnly ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(m_telemetryConfig.retentionBudgetMb)
+        .arg(m_telemetryConfig.traceBufferMb)
+        .arg(m_telemetryConfig.metricsBufferMb)
+        .arg(m_telemetryConfig.emergencySnapshotMb)
+        .arg(m_telemetryConfig.burstOnHardCapBreach ? QStringLiteral("true")
+                              : QStringLiteral("false"))
+        .arg(m_telemetryConfig.burstDurationSeconds)
+        .arg(m_telemetryConfig.pretriggerRewindSeconds)
+        .arg(m_telemetryConfig.burstCooldownSeconds));
+
+    Logger::instance().info(
+      QString("[RealAndroidAutoService] Thermal control config: trigger_c=%1 clear_c=%2 emergency_throttle=%3")
+        .arg(m_thermalControlConfig.level2TriggerTempC)
+        .arg(m_thermalControlConfig.level2ClearTempC)
+        .arg(m_thermalControlConfig.emergencyDecodeThrottleEnabled ? QStringLiteral("true")
+                                     : QStringLiteral("false")));
 
   QString mode = settings.value("connectionMode", "auto").toString().toLower();
   Logger::instance().info(
@@ -2686,6 +3140,7 @@ void RealAndroidAutoService::deinitialise() {
     disconnect();
   }
 
+  teardownWebRtcBridge();
   cleanupAASDK();
   m_isInitialised = false;
   transitionToState(ConnectionState::DISCONNECTED);
@@ -3008,7 +3463,8 @@ void RealAndroidAutoService::setupChannels() {
     }
 
     // Initialize video decoder
-    if (m_channelConfig.videoEnabled) {
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
       m_videoDecoder = std::make_unique<GStreamerVideoDecoder>(this);
 
       IVideoDecoder::DecoderConfig decoderConfig;
@@ -3022,7 +3478,9 @@ void RealAndroidAutoService::setupChannels() {
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
           [this](int width, int height, const QByteArray& frameData) {
-                  m_videoDecodedFrameCount++;
+                    m_videoDecodedFrameCount++;
+                    m_videoDecodeBacklogEstimate =
+                      std::max(0, m_videoDecodeBacklogEstimate - 1);
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
                     aaLogDebug(
@@ -3045,6 +3503,10 @@ void RealAndroidAutoService::setupChannels() {
                 [](const QString& error) {
                   Logger::instance().error("Video decoder error: " + error);
                 });
+
+        if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+          setupWebRtcBridge();
+        }
 
         Logger::instance().info(
             QString("Video decoder initialized: %1").arg(m_videoDecoder->getDecoderName()));
@@ -3233,14 +3695,30 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
       Logger::instance().info("WiFi projection channel enabled (TCP)");
     }
 
-    // Initialize video decoder
-    if (m_channelConfig.videoEnabled) {
+    // Initialize video decoder at the negotiated stream resolution.
+    // IMPORTANT: use negotiatedVideoResolution() here, not m_resolution.
+    // m_resolution holds the UI display size (for touch scaling) and defaults
+    // to 1024x600 before the UI sends an update.  Using it for the decoder
+    // caused the GStreamer pipeline to initialise at 1024x600 while the phone
+    // streams at 1920x1080, triggering a caps renegotiation on the first IDR
+    // frame that produced visible HDMI flicker.
+    if (m_channelConfig.videoEnabled &&
+        m_videoTransportMode != VideoTransportMode::WEBSOCKET_H264) {
+      const QSize streamRes = negotiatedVideoResolution();
+      m_negotiatedVideoResolution = streamRes;
+      aaLogInfo("setupChannelsWithTransport",
+                QString("video decoder init (TCP): negotiated_stream=%1x%2 display=%3x%4")
+                    .arg(streamRes.width())
+                    .arg(streamRes.height())
+                    .arg(m_resolution.width())
+                    .arg(m_resolution.height()));
+
       m_videoDecoder = std::make_unique<GStreamerVideoDecoder>(this);
 
       IVideoDecoder::DecoderConfig decoderConfig;
       decoderConfig.codec = IVideoDecoder::CodecType::H264;
-      decoderConfig.width = m_resolution.width();
-      decoderConfig.height = m_resolution.height();
+      decoderConfig.width = streamRes.width();
+      decoderConfig.height = streamRes.height();
       decoderConfig.fps = m_fps;
       decoderConfig.outputFormat = IVideoDecoder::PixelFormat::RGBA;
       decoderConfig.hardwareAcceleration = true;
@@ -3248,7 +3726,9 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
       if (m_videoDecoder->initialize(decoderConfig)) {
         connect(m_videoDecoder.get(), &IVideoDecoder::frameDecoded, this,
           [this](int width, int height, const QByteArray& frameData) {
-                  m_videoDecodedFrameCount++;
+                    m_videoDecodedFrameCount++;
+                    m_videoDecodeBacklogEstimate =
+                      std::max(0, m_videoDecodeBacklogEstimate - 1);
                   if (shouldEmitChannelDebugSample(&m_videoDecodedFrameCount,
                                                    &m_lastVideoDecodeDebugMs)) {
                     aaLogDebug(
@@ -3271,6 +3751,10 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
                 [](const QString& error) {
                   Logger::instance().error("Video decoder error: " + error);
                 });
+
+        if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+          setupWebRtcBridge();
+        }
 
         Logger::instance().info(
             QString("Video decoder initialized: %1").arg(m_videoDecoder->getDecoderName()));
@@ -3395,6 +3879,8 @@ void RealAndroidAutoService::cleanupAASDK() {
   // Clean up channels after IO and messenger are quiesced.
   cleanupChannels();
 
+  teardownWebRtcBridge();
+
   // Stop USB hub
   if (m_usbHub) {
     m_usbHub->cancel();
@@ -3480,10 +3966,103 @@ void RealAndroidAutoService::cleanupAASDK() {
   Logger::instance().info("AASDK components cleaned up");
 }
 
+void RealAndroidAutoService::rearmActiveReceives() {
+  // This method is the core of the flicker-suppression strategy.
+  //
+  // Background: openauto keeps its Qt/OMX video pipeline alive across USB
+  // transport hiccups. It does not tear down the video surface on every
+  // AASDK channel error — the receive on the channel is simply re-armed and
+  // the session continues. Crankshaft previously fell through to the
+  // disconnect/reconnect path even for transient USB errors, which caused
+  // the GStreamer video decoder to be deinitialized and restarted, producing
+  // the visible HDMI flicker.
+  //
+  // This method mimics openauto's behaviour: re-arm every active channel
+  // receive callback without touching the transport, messenger, cryptor,
+  // video decoder, or audio mixer. The video pipeline stays alive and the
+  // phone simply resumes streaming once the USB connection stabilises.
+
+  if (m_aasdkTeardownInProgress) {
+    aaLogDebug("channelError", "rearmActiveReceives: skipped — teardown is in progress");
+    return;
+  }
+
+  if (m_state != ConnectionState::CONNECTED) {
+    aaLogDebug("channelError",
+               QString("rearmActiveReceives: skipped — state=%1 (not CONNECTED)")
+                   .arg(connectionStateToString(m_state)));
+    return;
+  }
+
+  ++m_rearmActiveReceivesCount;
+  aaLogWarning("channelError",
+               QString("rearmActiveReceives: count=%1 state=%2 videoStarted=%3 audioStarted=%4")
+                   .arg(m_rearmActiveReceivesCount)
+                   .arg(connectionStateToString(m_state))
+                   .arg(m_videoStarted ? QStringLiteral("true") : QStringLiteral("false"))
+                   .arg(m_mediaAudioStarted ? QStringLiteral("true") : QStringLiteral("false")));
+
+  // Re-arm the control channel first so the phone can re-send any pending
+  // protocol messages (e.g. video focus, service discovery completion).
+  if (m_controlChannel && m_controlEventHandler) {
+    m_controlChannel->receive(m_controlEventHandler);
+  }
+
+  // Re-arm the video channel immediately; this is the most important receive
+  // to keep alive so the media pipeline does not stall or produce a blank frame.
+  if (m_videoChannel && m_videoEventHandler) {
+    m_videoChannel->receive(m_videoEventHandler);
+  }
+
+  // Re-arm all audio sink channels.
+  if (m_mediaAudioChannel && m_mediaAudioEventHandler) {
+    m_mediaAudioChannel->receive(m_mediaAudioEventHandler);
+  }
+  if (m_systemAudioChannel && m_systemAudioEventHandler) {
+    m_systemAudioChannel->receive(m_systemAudioEventHandler);
+  }
+  if (m_speechAudioChannel && m_speechAudioEventHandler) {
+    m_speechAudioChannel->receive(m_speechAudioEventHandler);
+  }
+  if (m_telephonyAudioChannel && m_telephonyAudioEventHandler) {
+    m_telephonyAudioChannel->receive(m_telephonyAudioEventHandler);
+  }
+
+  // Re-arm the input and sensor source channels.
+  if (m_inputChannel && m_inputEventHandler) {
+    m_inputChannel->receive(m_inputEventHandler);
+  }
+  if (m_sensorChannel && m_sensorEventHandler) {
+    m_sensorChannel->receive(m_sensorEventHandler);
+  }
+
+  // Re-arm microphone only when the session is already past the pre-start
+  // window; during AOAP negotiation the microphone is not yet active.
+  if (m_serviceDiscoveryCompleted && m_microphoneChannel && m_microphoneEventHandler) {
+    m_microphoneChannel->receive(m_microphoneEventHandler);
+  }
+
+  // Re-arm optional channels.
+  if (m_bluetoothChannel && m_bluetoothEventHandler) {
+    m_bluetoothChannel->receive(m_bluetoothEventHandler);
+  }
+  if (m_wifiProjectionChannel && m_wifiProjectionEventHandler) {
+    m_wifiProjectionChannel->receive(m_wifiProjectionEventHandler);
+  }
+
+  aaLogInfo("channelError",
+            QString("rearmActiveReceives: all active receives re-armed (count=%1)")
+                .arg(m_rearmActiveReceivesCount));
+}
+
 void RealAndroidAutoService::performImmediateTransportRecovery(const QString& reason) {
-  aaLogWarning("channelError", QString("performImmediateTransportRecovery reason=%1 state=%2")
-                                   .arg(reason)
-                                   .arg(connectionStateToString(m_state)));
+  aaLogWarning(
+      "channelError",
+      QString("performImmediateTransportRecovery reason=%1 state=%2 deviceGoneRecoveryScheduled=%3")
+          .arg(reason)
+          .arg(connectionStateToString(m_state))
+          .arg(m_deviceGoneRecoveryScheduled ? QStringLiteral("true")
+                                            : QStringLiteral("false")));
 
   if (m_deviceGoneRecoveryScheduled) {
     aaLogInfo("channelError", "Immediate transport recovery already scheduled, ignoring");
@@ -4044,9 +4623,23 @@ bool RealAndroidAutoService::setDisplayResolution(const QSize& resolution) {
     return false;
   }
 
+  // m_resolution is the UI display size used ONLY for touch coordinate scaling.
+  // It has no effect on the phone's H.264 stream resolution or the GStreamer
+  // decoder pipeline — those are governed by negotiatedVideoResolution() which
+  // is fixed at session-setup time from config.
+  // Ignore repeated calls with the same value to keep the journal clean.
+  if (m_resolution == resolution) {
+    return true;
+  }
+
+  const QSize previousResolution = m_resolution;
   m_resolution = resolution;
-  Logger::instance().info(
-      QString("Display resolution set to %1x%2").arg(resolution.width()).arg(resolution.height()));
+  aaLogInfo("setDisplayResolution",
+            QString("display size updated (touch scaling only): %1x%2 -> %3x%4")
+                .arg(previousResolution.width())
+                .arg(previousResolution.height())
+                .arg(resolution.width())
+                .arg(resolution.height()));
 
   return true;
 }
@@ -4071,15 +4664,26 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
   try {
     using namespace crankshaft::protocol;
 
-    const int boundedX = qBound(0, x, qMax(0, m_resolution.width() - 1));
-    const int boundedY = qBound(0, y, qMax(0, m_resolution.height() - 1));
+    // Touch coordinates are expressed in the Android Auto projection/video
+    // coordinate space, never in the physical UI display space.
+    // Touch coordinates use the same coordinate space advertised by the
+    // INPUT_SOURCE and VIDEO_SINK capabilities. m_resolution is updated from
+    // the UI before service discovery and is also the resolution used by
+    // appendVideoSinkFeature(). The decoder's output size must not influence
+    // the AA input coordinate system.
+    const QSize touchResolution = m_resolution;
+    const int boundedX = qBound(0, x, qMax(0, touchResolution.width() - 1));
+    const int boundedY = qBound(0, y, qMax(0, touchResolution.height() - 1));
 
     // Map action (0=DOWN, 1=UP, 2=MOVE)
     TouchAction touchAction;
+    QString actionLabel = QStringLiteral("MOVED");
     if (action == 0) {
       touchAction = TouchAction::ACTION_DOWN;
+      actionLabel = QStringLiteral("DOWN");
     } else if (action == 1) {
       touchAction = TouchAction::ACTION_UP;
+      actionLabel = QStringLiteral("UP");
     } else {
       touchAction = TouchAction::ACTION_MOVED;
     }
@@ -4087,18 +4691,52 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
     auto data = createTouchInputReport(static_cast<uint32_t>(boundedX),
                                        static_cast<uint32_t>(boundedY), touchAction);
 
+    ++m_touchInputCount;
+
+    const auto* touchEvent = data.has_touch_event() ? &data.touch_event() : nullptr;
+    const bool hasPointer = touchEvent && touchEvent->pointer_data_size() > 0;
+    const auto* pointer = hasPointer ? &touchEvent->pointer_data(0) : nullptr;
+
+    Logger::instance().info(
+        QString("[AA][touch] report #%1: inputChannel=%2 resolution=%3x%4 "
+                "timestamp=%5 bytes=%6 action=%7 actionIndex=%8 pointers=%9 "
+                "pointer0=(%10,%11,id=%12)")
+            .arg(m_touchInputCount)
+            .arg(reinterpret_cast<quintptr>(m_inputChannel.get()), 0, 16)
+            .arg(touchResolution.width())
+            .arg(touchResolution.height())
+            .arg(static_cast<qulonglong>(data.timestamp()))
+            .arg(static_cast<qulonglong>(data.ByteSizeLong()))
+            .arg(touchEvent ? static_cast<int>(touchEvent->action()) : -1)
+            .arg(touchEvent && touchEvent->has_action_index()
+                     ? static_cast<int>(touchEvent->action_index())
+                     : -1)
+            .arg(touchEvent ? touchEvent->pointer_data_size() : 0)
+            .arg(pointer ? static_cast<uint>(pointer->x()) : 0)
+            .arg(pointer ? static_cast<uint>(pointer->y()) : 0)
+            .arg(pointer ? static_cast<uint>(pointer->pointer_id()) : 0));
+
     auto promise = aasdk::channel::SendPromise::defer(*m_strand);
+    const quint64 reportNumber = m_touchInputCount;
     promise->then(
-        []() {
-          // Success - touch input sent
+        [reportNumber, actionLabel]() {
+          Logger::instance().info(
+              QString("[AA][touch] report #%1 transport send SUCCESS action=%2")
+                  .arg(reportNumber)
+                  .arg(actionLabel));
         },
-        [self = QPointer<RealAndroidAutoService>(this)](const aasdk::error::Error& error) {
+        [self = QPointer<RealAndroidAutoService>(this), reportNumber, actionLabel](
+            const aasdk::error::Error& error) {
           const QString errorText = QString::fromStdString(error.what());
           Logger::instance().warning(
-              QString("Failed to send touch input: %1").arg(errorText));
+              QString("[AA][touch] report #%1 transport send FAILED action=%2: %3")
+                  .arg(reportNumber)
+                  .arg(actionLabel)
+                  .arg(errorText));
 
           if (self &&
-              (isSslWrapperNoDeviceErrorText(errorText) || isTransportNoDeviceErrorText(errorText) ||
+              (isSslWrapperNoDeviceErrorText(errorText) ||
+               isTransportNoDeviceErrorText(errorText) ||
                isUsbTransferNoDeviceErrorText(errorText))) {
             self->onChannelError(QStringLiteral("input"), errorText);
           }
@@ -4106,10 +4744,12 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
 
     m_inputChannel->sendInputReport(data, std::move(promise));
 
-    Logger::instance().debug(QString("Touch input sent: x=%1, y=%2, action=%3")
-                   .arg(boundedX)
-                   .arg(boundedY)
-                                 .arg(action));
+    Logger::instance().info(
+        QString("[AA][touch] report #%1 handed to InputSourceService: x=%2 y=%3 action=%4")
+            .arg(reportNumber)
+            .arg(boundedX)
+            .arg(boundedY)
+            .arg(action));
 
     return true;
   } catch (const std::exception& e) {
@@ -5642,6 +6282,11 @@ void RealAndroidAutoService::onVideoFrame(const uint8_t* data, int size, int wid
 
   const QByteArray frameData(reinterpret_cast<const char*>(data), size);
   emit videoFrameReady(width, height, frameData);
+  if (m_webRtcBridge && m_webRtcBridge->isInitialized()) {
+    if (!m_webRtcBridge->pushVideoFrame(frameData)) {
+      aaLogDebug("videoWebRTC", "failed to push video frame into WebRTC bridge");
+    }
+  }
   updateStats();
 }
 
@@ -5651,6 +6296,76 @@ void RealAndroidAutoService::onAudioData(const QByteArray& data) {
   }
 
   emit audioDataReady(data);
+}
+
+void RealAndroidAutoService::handleWebRtcSignalingMessage(const QString& topic,
+                                                          const QVariantMap& payload) {
+  if (!m_webRtcBridge) {
+    Logger::instance().warning(
+        QString("[RealAndroidAutoService] Ignoring WebRTC signaling topic without bridge: %1")
+            .arg(topic));
+    return;
+  }
+
+  if (!m_webRtcBridge->handleWebRtcSignalingMessage(topic, payload)) {
+    Logger::instance().warning(
+        QString("[RealAndroidAutoService] WebRTC signaling handler rejected topic: %1").arg(topic));
+  }
+}
+
+void RealAndroidAutoService::setupWebRtcBridge() {
+  if (m_webRtcBridge && m_webRtcBridge->isInitialized()) {
+    return;
+  }
+
+  if (!m_webRtcBridge) {
+    m_webRtcBridge = std::make_unique<GStreamerWebRtcBridge>(this);
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::signalingMessageReady, this,
+            [this](const QString& topic, const QVariantMap& payload) {
+              emit webRtcSignalingMessage(topic, payload);
+            });
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::statusChanged, this,
+            [this](const QJsonObject& status) {
+              QJsonObject augmentedStatus = status;
+              augmentedStatus[QStringLiteral("video_transport_mode")] =
+                  AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+              emit projectionStatusChanged(augmentedStatus);
+            });
+    connect(m_webRtcBridge.get(), &GStreamerWebRtcBridge::errorOccurred, this,
+            [this](const QString& error) {
+              Logger::instance().warning(
+                  QString("[RealAndroidAutoService] WebRTC bridge error: %1").arg(error));
+
+              // Bridge runtime errors can leave the UI waiting for WebRTC frames.
+              // Fall back immediately to websocket-jpeg so projection can continue.
+              if (m_videoTransportMode == VideoTransportMode::WEBRTC) {
+                Logger::instance().warning(
+                    "[RealAndroidAutoService] Falling back to websocket-jpeg after WebRTC bridge runtime error");
+                m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+                m_videoTransportFallbackReason = QStringLiteral("webrtc_runtime_bridge_error");
+                teardownWebRtcBridge();
+                publishProjectionStatus(QStringLiteral("webrtc_bridge_error_fallback"));
+              }
+
+              emit errorOccurred(error);
+            });
+  }
+
+  if (!m_webRtcBridge->initialize(m_resolution, m_fps)) {
+    Logger::instance().warning(
+        "[RealAndroidAutoService] WebRTC bridge initialization failed; falling back to websocket frames");
+    m_videoTransportMode = VideoTransportMode::WEBSOCKET_JPEG;
+    m_videoTransportFallbackReason = QStringLiteral("webrtc_bridge_init_failed");
+    publishProjectionStatus(QStringLiteral("webrtc_bridge_init_fallback"));
+  }
+}
+
+void RealAndroidAutoService::teardownWebRtcBridge() {
+  if (!m_webRtcBridge) {
+    return;
+  }
+
+  m_webRtcBridge->deinitialize();
 }
 
 void RealAndroidAutoService::startControlPingLoop() {
@@ -6181,6 +6896,13 @@ void RealAndroidAutoService::publishProjectionStatus(const QString& reason) {
   status[QStringLiteral("media_audio_started")] = m_mediaAudioStarted;
   status[QStringLiteral("media_audio_frame_received")] = m_mediaAudioFrameReceived;
   status[QStringLiteral("media_audio_ready")] = audioReady;
+    status[QStringLiteral("video_transport_mode")] =
+      AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+    status[QStringLiteral("video_transport_requested")] =
+      AndroidAutoService::videoTransportModeToString(m_requestedVideoTransportMode);
+    status[QStringLiteral("video_transport_active")] =
+      AndroidAutoService::videoTransportModeToString(m_videoTransportMode);
+    status[QStringLiteral("video_transport_fallback_reason")] = m_videoTransportFallbackReason;
   status[QStringLiteral("system_audio_enabled")] = m_channelConfig.systemAudioEnabled;
   status[QStringLiteral("guidance_audio_enabled")] = m_channelConfig.speechAudioEnabled;
   status[QStringLiteral("telephony_audio_enabled")] = m_channelConfig.telephonyAudioEnabled;
@@ -6188,6 +6910,35 @@ void RealAndroidAutoService::publishProjectionStatus(const QString& reason) {
   status[QStringLiteral("sensor_enabled")] = m_channelConfig.sensorEnabled;
   status[QStringLiteral("microphone_enabled")] = m_channelConfig.microphoneEnabled;
   status[QStringLiteral("projection_ready")] = projectionReady;
+    status[QStringLiteral("decode_control_enabled")] = m_decodeControlConfig.enabled;
+    status[QStringLiteral("decode_dynamic_target_enabled")] =
+      m_decodeControlConfig.dynamicTargetEnabled;
+    status[QStringLiteral("decode_target_depth_nominal_frames")] =
+      m_decodeControlConfig.targetDepthNominalFrames;
+    status[QStringLiteral("decode_target_depth_min_frames")] =
+      m_decodeControlConfig.targetDepthMinFrames;
+    status[QStringLiteral("decode_target_depth_max_frames")] =
+      m_decodeControlConfig.targetDepthMaxFrames;
+    status[QStringLiteral("decode_soft_cap_frames")] = m_decodeControlConfig.softCapFrames;
+    status[QStringLiteral("decode_hard_cap_frames")] = m_decodeControlConfig.hardCapFrames;
+    status[QStringLiteral("decode_hysteresis_floor_frames")] =
+      m_decodeControlConfig.hysteresisFloorFrames;
+    status[QStringLiteral("decode_backlog_estimate_frames")] = m_videoDecodeBacklogEstimate;
+    status[QStringLiteral("decode_soft_cap_hit_count")] =
+      static_cast<qint64>(m_decodeSoftCapHitCount);
+    status[QStringLiteral("decode_hard_cap_breach_count")] =
+      static_cast<qint64>(m_decodeHardCapBreachCount);
+    status[QStringLiteral("telemetry_enabled")] = m_telemetryConfig.enabled;
+    status[QStringLiteral("telemetry_local_only")] = m_telemetryConfig.localOnly;
+    status[QStringLiteral("telemetry_retention_budget_mb")] = m_telemetryConfig.retentionBudgetMb;
+    status[QStringLiteral("telemetry_burst_on_hard_cap_breach")] =
+      m_telemetryConfig.burstOnHardCapBreach;
+    status[QStringLiteral("telemetry_burst_cooldown_seconds")] =
+      m_telemetryConfig.burstCooldownSeconds;
+    status[QStringLiteral("thermal_level2_trigger_temp_c")] =
+      m_thermalControlConfig.level2TriggerTempC;
+    status[QStringLiteral("thermal_level2_clear_temp_c")] =
+      m_thermalControlConfig.level2ClearTempC;
   status[QStringLiteral("timestamp")] = QDateTime::currentSecsSinceEpoch();
 
   if (projectionReady != m_lastProjectionReady) {
@@ -6226,7 +6977,13 @@ void RealAndroidAutoService::resetProjectionStatus(const QString& reason) {
   m_controlHandshakeStartedMs = 0;
   ++m_controlHandshakeEpoch;
   m_controlHandshakeActivationRetryCount = 0;
+  m_videoTransportFallbackReason.clear();
   m_lastProjectionReady = false;
+  m_videoDecodeBacklogEstimate = 0;
+  m_decodeSoftCapHitCount = 0;
+  m_decodeHardCapBreachCount = 0;
+  m_lastDecodeHardCapBreachMs = 0;
+  m_lastTelemetryBurstCaptureMs = 0;
   m_channelReceiveArmTraceKeys.clear();
   publishProjectionStatus(reason);
 }
@@ -6465,6 +7222,29 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
 
   m_videoPayloadCount++;
 
+  // For the H.264 WebSocket transport the UI owns decoding. Forward the
+  // original encoded payload and avoid the core-side H.264 -> RGBA conversion.
+  if (m_videoTransportMode == VideoTransportMode::WEBSOCKET_H264) {
+    ++m_videoEncodedEmitCount;
+    const qint64 emitIntervalMs =
+        m_lastVideoEncodedEmitTimer.isValid() ? m_lastVideoEncodedEmitTimer.elapsed() : -1;
+    m_lastVideoEncodedEmitTimer.restart();
+
+    if (m_videoEncodedEmitCount == 1 || (m_videoEncodedEmitCount % 30) == 0) {
+      aaLogInfo(
+          "videoChannel",
+          QString("H.264 encoded frame cadence: count=%1 intervalMs=%2 bytes=%3 resolution=%4x%5")
+              .arg(m_videoEncodedEmitCount)
+              .arg(emitIntervalMs)
+              .arg(data.size())
+              .arg(width)
+              .arg(height));
+    }
+
+    emit videoEncodedFrameReady(width, height, data);
+    return;
+  }
+
   // H.264 video data from Android device
   if (m_videoDecoder && m_videoDecoder->isReady()) {
     // Decode H.264 to RGBA using GStreamer
@@ -6475,6 +7255,36 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
     // Convert aasdk::common::Data to QByteArray
     QByteArray frameData(reinterpret_cast<const char*>(h264Data.data()), h264Data.size());
     m_videoDecodeSubmitCount++;
+    m_videoDecodeBacklogEstimate =
+        std::max(0, static_cast<int>(m_videoDecodeSubmitCount - m_videoDecodedFrameCount -
+                                     m_videoDecodeRejectCount));
+
+    if (m_decodeControlConfig.enabled &&
+        m_videoDecodeBacklogEstimate >= m_decodeControlConfig.softCapFrames) {
+      m_decodeSoftCapHitCount++;
+    }
+
+    if (m_decodeControlConfig.enabled &&
+        m_videoDecodeBacklogEstimate >= m_decodeControlConfig.hardCapFrames) {
+      m_decodeHardCapBreachCount++;
+      m_lastDecodeHardCapBreachMs = QDateTime::currentMSecsSinceEpoch();
+
+      if (m_telemetryConfig.enabled && m_telemetryConfig.burstOnHardCapBreach) {
+        const qint64 cooldownMs = static_cast<qint64>(m_telemetryConfig.burstCooldownSeconds) * 1000;
+        if (m_lastTelemetryBurstCaptureMs == 0 ||
+            (m_lastDecodeHardCapBreachMs - m_lastTelemetryBurstCaptureMs) >= cooldownMs) {
+          m_lastTelemetryBurstCaptureMs = m_lastDecodeHardCapBreachMs;
+          aaLogWarning(
+              "decodeLoop",
+              QString("hard-cap breach backlog=%1 hard_cap=%2 soft_cap=%3 breaches=%4 (telemetry burst marker)")
+                  .arg(m_videoDecodeBacklogEstimate)
+                  .arg(m_decodeControlConfig.hardCapFrames)
+                  .arg(m_decodeControlConfig.softCapFrames)
+                  .arg(m_decodeHardCapBreachCount));
+        }
+      }
+    }
+
     if (!m_videoDecoder->decodeFrame(frameData)) {
       Logger::instance().warning("Failed to decode video frame");
       aaLogWarning("videoDecoder",
@@ -6484,6 +7294,9 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
                        .arg(m_videoDecodeRejectCount + 1));
       m_videoDecodeRejectCount++;
       m_droppedFrames++;
+      m_videoDecodeBacklogEstimate =
+          std::max(0, static_cast<int>(m_videoDecodeSubmitCount - m_videoDecodedFrameCount -
+                                       m_videoDecodeRejectCount));
     }
   } else {
     Logger::instance().warning(
@@ -6668,14 +7481,77 @@ void RealAndroidAutoService::onChannelError(const QString& channelName, const QS
   const bool isTransferTimeout = isUsbTransferTimeoutErrorText(error);
   const bool isNoDevice =
       isUsbTransferNoDeviceErrorText(error) || isTransportNoDeviceErrorText(error);
+  const bool isRecoverableReceiveError = isRecoverableUsbReceiveErrorText(error);
   const bool isSslWrapperNoDevice = isSslWrapperNoDeviceErrorText(error);
   const bool isOperationAborted = isOperationAbortedErrorText(error);
   const bool isControlVersionTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Version request timed out after"));
+  const bool isNonControlChannel = channelName != QStringLiteral("control");
+  const bool preHandshakeWindowActive =
+      m_state == ConnectionState::CONNECTED && !m_controlVersionReceived &&
+      !m_serviceDiscoveryCompleted;
+
+  if (isNonControlChannel && preHandshakeWindowActive) {
+    const int graceWindowMs = getBoundedConfigValue(
+        "core.android_auto.channels.pre_handshake_error_grace_window_ms", 8000, 1000, 30000);
+    const int graceMaxErrors = getBoundedConfigValue(
+        "core.android_auto.channels.pre_handshake_error_grace_max_count", 6, 1, 50);
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_preHandshakeNonControlChannelErrorWindowStartMs <= 0 ||
+        (nowMs - m_preHandshakeNonControlChannelErrorWindowStartMs) > graceWindowMs) {
+      m_preHandshakeNonControlChannelErrorWindowStartMs = nowMs;
+      m_preHandshakeNonControlChannelErrorCount = 0;
+    }
+
+    ++m_preHandshakeNonControlChannelErrorCount;
+    const qint64 elapsedMs = nowMs - m_preHandshakeNonControlChannelErrorWindowStartMs;
+
+    aaLogWarning(
+        "channelError",
+        QString("channel=%1 state=%2 details=%3 -> pre-handshake non-control grace %4/%5 "
+                "(elapsed_ms=%6, control_version_received=%7, service_discovery_completed=%8)")
+            .arg(channelName)
+            .arg(connectionStateToString(m_state))
+            .arg(error)
+            .arg(m_preHandshakeNonControlChannelErrorCount)
+            .arg(graceMaxErrors)
+            .arg(elapsedMs)
+            .arg(m_controlVersionReceived ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_serviceDiscoveryCompleted ? QStringLiteral("true") : QStringLiteral("false")));
+
+    if (m_preHandshakeNonControlChannelErrorCount <= graceMaxErrors) {
+      return;
+    }
+
+    aaLogWarning("channelError",
+                 QString("pre-handshake non-control channel errors exceeded grace threshold; "
+                         "escalating to normal recovery path (%1 > %2)")
+                     .arg(m_preHandshakeNonControlChannelErrorCount)
+                     .arg(graceMaxErrors));
+  }
+
+  if (isRecoverableReceiveError && m_state == ConnectionState::CONNECTED) {
+    aaLogWarning(
+        "channelError",
+        QString("channel=%1 state=%2 details=%3 -> recoverable transport receive error, re-arming active receives")
+            .arg(channelName)
+            .arg(connectionStateToString(m_state))
+            .arg(error));
+    rearmActiveReceives();
+    return;
+  }
+
   const bool isControlHandshakeTimeout =
       channelName == QStringLiteral("control") &&
       error.startsWith(QStringLiteral("Handshake activation timed out after"));
+
+  if (channelName == QStringLiteral("control") || m_controlVersionReceived ||
+      m_serviceDiscoveryCompleted) {
+    m_preHandshakeNonControlChannelErrorCount = 0;
+    m_preHandshakeNonControlChannelErrorWindowStartMs = 0;
+  }
 
   if (channelName == QStringLiteral("video")) {
     m_videoStarted = false;

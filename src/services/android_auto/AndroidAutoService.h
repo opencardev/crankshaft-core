@@ -24,6 +24,7 @@
 #include <QObject>
 #include <QSize>
 #include <QString>
+#include <QVariantMap>
 #include <memory>
 
 // Forward declarations
@@ -39,6 +40,13 @@ class IWirelessNetworkManager;
  */
 class AndroidAutoService : public QObject {
   Q_OBJECT
+
+ public:
+  enum class VideoTransportMode {
+    WEBSOCKET_JPEG,
+    WEBSOCKET_H264,
+    WEBRTC,
+  };
 
  public:
   enum class ConnectionState {
@@ -192,6 +200,27 @@ class AndroidAutoService : public QObject {
   virtual int getFrameDropCount() const = 0;
 
   /**
+   * @brief Get the current video transport mode
+   */
+  virtual VideoTransportMode getVideoTransportMode() const = 0;
+
+  /**
+   * @brief Handle incoming WebRTC signaling from the UI/control plane
+   */
+  virtual void handleWebRtcSignalingMessage(const QString& topic,
+                                            const QVariantMap& payload) = 0;
+
+  /**
+   * @brief Convert a transport mode string to the enum value
+   */
+  static auto videoTransportModeFromString(const QString& mode) -> VideoTransportMode;
+
+  /**
+   * @brief Convert a transport mode enum value to a string label
+   */
+  static auto videoTransportModeToString(VideoTransportMode mode) -> QString;
+
+  /**
    * @brief Get latency in milliseconds
    */
   virtual int getLatency() const = 0;
@@ -236,6 +265,11 @@ class AndroidAutoService : public QObject {
   void videoFrameReady(int width, int height, const QByteArray& frameData);
 
   /**
+   * @brief Emitted with the original encoded H.264 video payload.
+   */
+  void videoEncodedFrameReady(int width, int height, const QByteArray& frameData);
+
+  /**
    * @brief Emitted when audio data is available
    */
   void audioDataReady(const QByteArray& data);
@@ -249,6 +283,11 @@ class AndroidAutoService : public QObject {
    * @brief Emitted when service info changes (FPS, latency)
    */
   void statsUpdated(int fps, int latency, int dropped_frames);
+
+  /**
+   * @brief Emitted when the service wants to send a WebRTC signaling message
+   */
+  void webRtcSignalingMessage(const QString& topic, const QVariantMap& payload);
 
   /**
    * @brief Emitted when projection channel readiness changes
