@@ -1260,7 +1260,13 @@ void WebSocketServer::setupAndroidAutoConnections() {
               m_videoFrameTimer.start();
             }
             const qint64 nowMs = m_videoFrameTimer.elapsed();
-            if ((nowMs - m_lastVideoFrameBroadcastMs) < m_videoFrameIntervalMs) {
+            // Always forward the first H.264 access/config unit.  With a fresh
+            // timer, nowMs can be less than m_videoFrameIntervalMs, which used
+            // to drop the first SPS/PPS payload and leave the UI decoder
+            // waiting indefinitely for parameter sets.
+            const bool firstH264Broadcast = (m_h264BroadcastCount == 0);
+            if (!firstH264Broadcast &&
+                (nowMs - m_lastVideoFrameBroadcastMs) < m_videoFrameIntervalMs) {
               return;
             }
             m_lastVideoFrameBroadcastMs = nowMs;
