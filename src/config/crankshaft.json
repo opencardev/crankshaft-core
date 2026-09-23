@@ -13,7 +13,7 @@
     "android_auto": {
       "startup_profile": "compat_openauto_profile",
       "compat_openauto_profile": true,
-      "video_transport_mode": "webrtc",
+      "video_transport_mode": "websocket-h264",
       "logging": {
         "enabled": true,
         "level": "debug",
@@ -48,6 +48,8 @@
           "height": 480
         },
         "fps": 30,
+        "negotiated_width": 800,
+        "negotiated_height": 480,
         "density": 140,
         "width_margin": 0,
         "height_margin": 0

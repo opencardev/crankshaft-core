@@ -28,6 +28,7 @@
 #include <QJsonObject>
 #include <QPointer>
 #include <QRandomGenerator>
+#include <QStringList>
 #include <QSet>
 #include <QTimer>
 #include <QUuid>
@@ -107,6 +108,51 @@ static void aaLogInfo(const char* area, const QString& message) {
 
 static void aaLogWarning(const char* area, const QString& message) {
   Logger::instance().warning(QString("[AA][%1] %2").arg(area, message));
+}
+
+
+
+static auto h264ContainsVclNal(const QByteArray& frameData) -> bool {
+  for (int index = 0; index + 3 < frameData.size(); ++index) {
+    int payload = -1;
+    if (frameData.at(index) == '\0' && frameData.at(index + 1) == '\0') {
+      if (frameData.at(index + 2) == '\x01') {
+        payload = index + 3;
+      } else if (index + 4 <= frameData.size() && frameData.at(index + 2) == '\0' &&
+                 frameData.at(index + 3) == '\x01') {
+        payload = index + 4;
+      }
+    }
+    if (payload >= 0 && payload < frameData.size()) {
+      const int nalType = static_cast<unsigned char>(frameData.at(payload)) & 0x1F;
+      if (nalType >= 1 && nalType <= 5) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static auto h264NalTypeSummary(const QByteArray& frameData) -> QString {
+  QStringList types;
+  for (int index = 0; index + 3 < frameData.size(); ++index) {
+    int payload = -1;
+    if (frameData.at(index) == '\0' && frameData.at(index + 1) == '\0') {
+      if (frameData.at(index + 2) == '\x01') {
+        payload = index + 3;
+      } else if (index + 4 <= frameData.size() && frameData.at(index + 2) == '\0' &&
+                 frameData.at(index + 3) == '\x01') {
+        payload = index + 4;
+      }
+    }
+    if (payload >= 0 && payload < frameData.size()) {
+      const int nalType = static_cast<unsigned char>(frameData.at(payload)) & 0x1F;
+      if (!types.contains(QString::number(nalType))) {
+        types.append(QString::number(nalType));
+      }
+    }
+  }
+  return types.join(',');
 }
 
 static std::atomic_bool g_channelDebugTelemetryEnabled{true};
@@ -932,11 +978,11 @@ static auto selectVideoResolution(const QSize& resolution)
 // decoded frames to fit the actual display, so the stream resolution and the
 // physical display resolution are fully decoupled.
 static auto negotiatedVideoResolution() -> QSize {
-  // Allow override via config; fall back to 1080p.
+  // Allow override via config; default to the requested 800x480 AA mode.
   const int w = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_width"), 1280, 480, 1920);
+      QStringLiteral("core.android_auto.video.negotiated_width"), 800, 480, 1920);
   const int h = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_height"), 720, 270, 1080);
+      QStringLiteral("core.android_auto.video.negotiated_height"), 480, 270, 1080);
   return QSize(w, h);
 }
 
@@ -6640,7 +6686,7 @@ void RealAndroidAutoService::ensureProjectionIdleWatchdogTimer() {
       }
     }
 
-    if (hasStartedStreamWithoutFirstFrame && !hasAnyMediaPayloadSeen) {
+    if (hasStartedStreamWithoutFirstFrame && !m_videoFrameReceived && !m_mediaAudioFrameReceived) {
       // Keep receive handlers armed while waiting for the first payload.
       if (m_videoChannel && m_videoEventHandler) {
         m_videoChannel->receive(m_videoEventHandler);
@@ -6658,7 +6704,14 @@ void RealAndroidAutoService::ensureProjectionIdleWatchdogTimer() {
         m_telephonyAudioChannel->receive(m_telephonyAudioEventHandler);
       }
 
-      if (!compatOpenAutoProfile && m_projectionStreamNudgeCount < maxStreamNudges &&
+      // With WebSocket H.264 the first payload may be only SPS/PPS.  The
+      // compat profile normally suppresses unsolicited stream nudges, but in
+      // this specific case the phone has started the video channel without
+      // delivering a VCL frame, so one bounded re-focus is needed to recover
+      // the stream without reconnecting the AA session.
+      const bool allowStreamNudge =
+          !compatOpenAutoProfile || m_videoTransportMode == VideoTransportMode::WEBSOCKET_H264;
+      if (allowStreamNudge && m_projectionStreamNudgeCount < maxStreamNudges &&
           (m_projectionStreamLastNudgeMs == 0 ||
            (nowMs - m_projectionStreamLastNudgeMs) >= streamNudgeIntervalMs)) {
         m_projectionStreamNudgeCount++;
@@ -7230,15 +7283,37 @@ void RealAndroidAutoService::onVideoChannelUpdate(const QByteArray& data, int wi
         m_lastVideoEncodedEmitTimer.isValid() ? m_lastVideoEncodedEmitTimer.elapsed() : -1;
     m_lastVideoEncodedEmitTimer.restart();
 
+    const bool containsVclNal = h264ContainsVclNal(data);
     if (m_videoEncodedEmitCount == 1 || (m_videoEncodedEmitCount % 30) == 0) {
       aaLogInfo(
           "videoChannel",
-          QString("H.264 encoded frame cadence: count=%1 intervalMs=%2 bytes=%3 resolution=%4x%5")
+          QString("H.264 encoded frame cadence: count=%1 intervalMs=%2 bytes=%3 resolution=%4x%5 "
+                  "vcl=%6 nal_types=%7")
               .arg(m_videoEncodedEmitCount)
               .arg(emitIntervalMs)
               .arg(data.size())
               .arg(width)
-              .arg(height));
+              .arg(height)
+              .arg(containsVclNal ? QStringLiteral("yes") : QStringLiteral("no"))
+              .arg(h264NalTypeSummary(data)));
+    }
+
+    // SPS/PPS/config payloads are media payloads but are not a displayed
+    // video frame.  The projection watchdog must continue to treat the
+    // stream as waiting for its first VCL frame until one actually arrives.
+    if (containsVclNal && !m_videoFrameReceived) {
+      m_videoFrameReceived = true;
+      const qint64 sinceDiscoveryMs =
+          m_projectionIdleWatchdogStartedMs > 0
+              ? (QDateTime::currentMSecsSinceEpoch() - m_projectionIdleWatchdogStartedMs)
+              : -1;
+      aaLogInfo(
+          "videoChannel",
+          QString("First H.264 VCL frame accepted bytes=%1 since_discovery_ms=%2 "
+                  "videoStarted=%3")
+              .arg(data.size())
+              .arg(sinceDiscoveryMs)
+              .arg(m_videoStarted ? QStringLiteral("true") : QStringLiteral("false")));
     }
 
     emit videoEncodedFrameReady(width, height, data);
