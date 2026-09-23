@@ -978,11 +978,11 @@ static auto selectVideoResolution(const QSize& resolution)
 // decoded frames to fit the actual display, so the stream resolution and the
 // physical display resolution are fully decoupled.
 static auto negotiatedVideoResolution() -> QSize {
-  // Allow override via config; fall back to 1080p.
+  // Allow override via config; default to the requested 800x480 AA mode.
   const int w = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_width"), 1280, 480, 1920);
+      QStringLiteral("core.android_auto.video.negotiated_width"), 800, 480, 1920);
   const int h = getBoundedConfigValue(
-      QStringLiteral("core.android_auto.video.negotiated_height"), 720, 270, 1080);
+      QStringLiteral("core.android_auto.video.negotiated_height"), 480, 270, 1080);
   return QSize(w, h);
 }
 
