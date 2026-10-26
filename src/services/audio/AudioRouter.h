@@ -37,9 +37,25 @@ enum class AAudioStreamRole {
   MEDIA,         ///< Media/music playback
   SYSTEM_AUDIO,  ///< Navigation and system sounds
   GUIDANCE,      ///< Voice guidance only
-  PHONE_CALL,    ///< Phone call audio (future)
+  PHONE_CALL,    ///< Phone call audio
   UNKNOWN = -1
 };
+
+/**
+ * @brief Sample rate and channel count of one Android Auto audio stream.
+ */
+struct AudioStreamFormat {
+  int sampleRate;
+  int channels;
+};
+
+/**
+ * @brief Format of the stream for a role, as advertised to the phone.
+ *
+ * Service discovery and the router both read this table, so they cannot disagree.
+ * Returns {0, 0} for UNKNOWN.
+ */
+auto audioStreamFormat(AAudioStreamRole role) -> AudioStreamFormat;
 
 /**
  * @brief Core-owned audio output for Android Auto channels and user controls.
@@ -121,6 +137,15 @@ class AudioRouter : public QObject {
 
  signals:
   void routingError(const QString& message);
+
+  /**
+   * @brief Emitted after a frame is pushed to the pipeline.
+   * @param stream Source name: "media", "guidance", "system" or "telephony"
+   * @param sampleRate Sample rate of the frame in Hz, before any resampling
+   * @param channels Always 2: the frame is interleaved S16LE after the mono upmix
+   * @param pcm The stereo samples as played, after balance and ducking
+   */
+  void frameRouted(const QString& stream, int sampleRate, int channels, const QByteArray& pcm);
 
  private:
   auto initializePipeWire() -> bool;

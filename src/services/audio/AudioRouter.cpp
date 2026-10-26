@@ -39,8 +39,9 @@
 
 namespace {
 
-// Source formats are the Android Auto channel layouts. They must match the
-// AASDK audio channel configuration; verify on hardware when that changes.
+// Source formats are the Android Auto channel layouts. Core chooses them and
+// advertises them to the phone in RealAndroidAutoService (service discovery);
+// AASDK does not define them. Confirm them on hardware.
 struct SourceFormat {
   const char* name;
   int sampleRate;
@@ -50,6 +51,7 @@ struct SourceFormat {
 constexpr SourceFormat kMediaFormat{"media", 48000, 2};
 constexpr SourceFormat kGuidanceFormat{"guidance", 16000, 1};
 constexpr SourceFormat kSystemFormat{"system", 16000, 1};
+constexpr SourceFormat kTelephonyFormat{"telephony", 16000, 1};
 
 const SourceFormat* formatForRole(AAudioStreamRole role) {
   switch (role) {
@@ -59,6 +61,8 @@ const SourceFormat* formatForRole(AAudioStreamRole role) {
       return &kGuidanceFormat;
     case AAudioStreamRole::SYSTEM_AUDIO:
       return &kSystemFormat;
+    case AAudioStreamRole::PHONE_CALL:
+      return &kTelephonyFormat;
     default:
       return nullptr;
   }
@@ -156,12 +160,27 @@ bool AudioRouter::initialize() {
 
 void AudioRouter::createMixerSources() {
   AudioHAL* audioHal = m_mediaPipeline->audioHAL();
-  for (const SourceFormat& format : {kMediaFormat, kGuidanceFormat, kSystemFormat}) {
-    if (!audioHal->addSource(QString::fromLatin1(format.name), format.sampleRate)) {
-      Logger::instance().error(QStringLiteral("[AudioRouter] Failed to create mixer source %1")
-                                   .arg(QString::fromLatin1(format.name)));
+  for (const SourceFormat& format :
+       {kMediaFormat, kGuidanceFormat, kSystemFormat, kTelephonyFormat}) {
+    const QString name = QString::fromLatin1(format.name);
+    if (!audioHal->addSource(name, format.sampleRate)) {
+      Logger::instance().error(
+          QStringLiteral("[AudioRouter] Failed to create mixer source %1").arg(name));
+      continue;
     }
+    Logger::instance().info(QStringLiteral("[AudioRouter] Mixer source %1: %2 Hz, %3 channels")
+                                .arg(name)
+                                .arg(format.sampleRate)
+                                .arg(format.channels));
   }
+}
+
+AudioStreamFormat audioStreamFormat(AAudioStreamRole role) {
+  const SourceFormat* format = formatForRole(role);
+  if (!format) {
+    return {0, 0};
+  }
+  return {format->sampleRate, format->channels};
 }
 
 void AudioRouter::applyStoredState() {
@@ -342,11 +361,13 @@ bool AudioRouter::routeAudioFrame(AAudioStreamRole role, const QByteArray& audio
   }
   audio_math::applyStereoGains(stereo.data(), stereo.size(), gains);
 
-  if (!m_mediaPipeline->pushAudioData(QString::fromLatin1(format->name), stereo)) {
+  const QString stream = QString::fromLatin1(format->name);
+  if (!m_mediaPipeline->pushAudioData(stream, stereo)) {
     Logger::instance().error(QStringLiteral("[AudioRouter] Failed to push audio data to pipeline"));
     return false;
   }
 
+  emit frameRouted(stream, format->sampleRate, 2, stereo);
   return true;
 }
 

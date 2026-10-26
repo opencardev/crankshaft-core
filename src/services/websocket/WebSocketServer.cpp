@@ -1389,8 +1389,8 @@ void WebSocketServer::setupAndroidAutoConnections() {
             payload["data"] = QString::fromLatin1(broadcastFrame.toBase64());
             broadcastEvent("android-auto/media/video-frame", payload);
           });
-  connect(aaService, &AndroidAutoService::audioDataReady, this,
-          &WebSocketServer::onAndroidAutoAudioDataReady);
+  connect(aaService, &AndroidAutoService::audioFrameRouted, this,
+          &WebSocketServer::onAndroidAutoAudioFrameRouted);
   connect(aaService, &AndroidAutoService::projectionStatusChanged, this,
           &WebSocketServer::onAndroidAutoProjectionStatus);
     connect(aaService, &AndroidAutoService::webRtcSignalingMessage, this,
@@ -1513,7 +1513,8 @@ void WebSocketServer::onAndroidAutoVideoFrameReady(int width, int height,
   broadcastEvent("android-auto/media/video-frame", payload);
 }
 
-void WebSocketServer::onAndroidAutoAudioDataReady(const QByteArray& data) {
+void WebSocketServer::onAndroidAutoAudioFrameRouted(const QString& stream, int sampleRate,
+                                                    int channels, const QByteArray& data) {
   if (data.isEmpty()) {
     return;
   }
@@ -1522,10 +1523,13 @@ void WebSocketServer::onAndroidAutoAudioDataReady(const QByteArray& data) {
     return;
   }
 
+  // Each frame is one stream as played. The stream and format are included so a
+  // subscriber does not have to assume one layout for all of them.
   QVariantMap payload;
   payload["encoding"] = "pcm_s16le_base64";
-  payload["sampleRate"] = 48000;
-  payload["channels"] = 2;
+  payload["stream"] = stream;
+  payload["sampleRate"] = sampleRate;
+  payload["channels"] = channels;
   payload["sequence"] = static_cast<qulonglong>(++m_audioChunkSequence);
   payload["data"] = QString::fromLatin1(data.toBase64());
   broadcastEvent("android-auto/media/audio-chunk", payload);

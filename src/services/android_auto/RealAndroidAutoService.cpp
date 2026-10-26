@@ -36,7 +36,6 @@
 #include <atomic>
 #include <functional>
 
-#include "../../hal/multimedia/AudioMixer.h"
 #include "../../hal/multimedia/GStreamerVideoDecoder.h"
 #include "../../hal/multimedia/GStreamerWebRtcBridge.h"
 #include "../audio/AudioRouter.h"
@@ -1032,8 +1031,8 @@ static void appendVideoSinkFeature(
 static void appendAudioSinkFeature(
     aap_protobuf::service::control::message::ServiceDiscoveryResponse& response,
     const std::shared_ptr<aasdk::channel::mediasink::audio::IAudioMediaSinkService>& channel,
-    aap_protobuf::service::media::sink::message::AudioStreamType audioType, uint32_t sampleRate,
-    uint32_t channels) {
+    aap_protobuf::service::media::sink::message::AudioStreamType audioType,
+    const AudioStreamFormat& format) {
   if (!channel) {
     return;
   }
@@ -1048,9 +1047,9 @@ static void appendAudioSinkFeature(
   mediaSink->set_available_while_in_call(true);
 
   auto* audioConfig = mediaSink->add_audio_configs();
-  audioConfig->set_sampling_rate(sampleRate);
+  audioConfig->set_sampling_rate(static_cast<uint32_t>(format.sampleRate));
   audioConfig->set_number_of_bits(16);
-  audioConfig->set_number_of_channels(channels);
+  audioConfig->set_number_of_channels(static_cast<uint32_t>(format.channels));
 }
 
 static void appendInputSourceFeature(
@@ -1696,17 +1695,17 @@ class AAControlEventHandler final
                  m_service->m_fps, m_service->m_videoDensity,
                  m_service->m_videoWidthMargin, m_service->m_videoHeightMargin);
     appendAudioSinkFeature(response, m_service->m_mediaAudioChannel,
-                           aap_protobuf::service::media::sink::message::AUDIO_STREAM_MEDIA, 48000,
-                           2);
+                           aap_protobuf::service::media::sink::message::AUDIO_STREAM_MEDIA,
+                           audioStreamFormat(AAudioStreamRole::MEDIA));
     appendAudioSinkFeature(response, m_service->m_systemAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_SYSTEM_AUDIO,
-                           16000, 1);
+                           audioStreamFormat(AAudioStreamRole::SYSTEM_AUDIO));
     appendAudioSinkFeature(response, m_service->m_speechAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_GUIDANCE,
-                           16000, 1);
+                           audioStreamFormat(AAudioStreamRole::GUIDANCE));
     appendAudioSinkFeature(response, m_service->m_telephonyAudioChannel,
                            aap_protobuf::service::media::sink::message::AUDIO_STREAM_TELEPHONY,
-                           16000, 1);
+                           audioStreamFormat(AAudioStreamRole::PHONE_CALL));
     // The phone's touchscreen coordinate space must match the resolution
     // advertised by the VIDEO_SINK. In this implementation that is m_resolution,
     // which is published by the UI before service discovery. The decoder may
@@ -2982,6 +2981,7 @@ RealAndroidAutoService::RealAndroidAutoService(MediaPipeline* mediaPipeline, QOb
 
   // Initialize AudioRouter for AA audio channel management
   m_audioRouter = new AudioRouter(mediaPipeline, this);
+  connect(m_audioRouter, &AudioRouter::frameRouted, this, &AndroidAutoService::audioFrameRouted);
   if (!m_audioRouter->initialize()) {
     Logger::instance().warning(
         "[RealAndroidAutoService] Failed to initialize AudioRouter - audio may not work");
@@ -3562,62 +3562,6 @@ void RealAndroidAutoService::setupChannels() {
       }
     }
 
-    // Initialize audio mixer
-    if (m_channelConfig.mediaAudioEnabled || m_channelConfig.systemAudioEnabled ||
-        m_channelConfig.speechAudioEnabled || m_channelConfig.telephonyAudioEnabled) {
-      m_audioMixer = std::make_unique<AudioMixer>(this);
-
-      IAudioMixer::AudioFormat masterFormat;
-      masterFormat.sampleRate = 48000;
-      masterFormat.channels = 2;
-      masterFormat.bitsPerSample = 16;
-
-      if (m_audioMixer->initialize(masterFormat)) {
-        // Add media audio channel (48kHz stereo)
-        if (m_channelConfig.mediaAudioEnabled) {
-          IAudioMixer::ChannelConfig mediaConfig;
-          mediaConfig.id = IAudioMixer::ChannelId::MEDIA;
-          mediaConfig.volume = 0.8f;
-          mediaConfig.priority = 1;
-          mediaConfig.format = masterFormat;
-          m_audioMixer->addChannel(mediaConfig);
-        }
-
-        // Add system audio channel (16kHz mono)
-        if (m_channelConfig.systemAudioEnabled) {
-          IAudioMixer::ChannelConfig systemConfig;
-          systemConfig.id = IAudioMixer::ChannelId::SYSTEM;
-          systemConfig.volume = 1.0f;
-          systemConfig.priority = 2;
-          systemConfig.format = {16000, 1, 16};
-          m_audioMixer->addChannel(systemConfig);
-        }
-
-        // Add speech audio channel (16kHz mono)
-        if (m_channelConfig.speechAudioEnabled) {
-          IAudioMixer::ChannelConfig speechConfig;
-          speechConfig.id = IAudioMixer::ChannelId::SPEECH;
-          speechConfig.volume = 1.0f;
-          speechConfig.priority = 3;
-          speechConfig.format = {16000, 1, 16};
-          m_audioMixer->addChannel(speechConfig);
-        }
-
-        // Connect mixed audio output
-        connect(m_audioMixer.get(), &IAudioMixer::audioMixed, this,
-                [this](const QByteArray& mixedData) { emit audioDataReady(mixedData); });
-
-        connect(m_audioMixer.get(), &IAudioMixer::errorOccurred, this, [](const QString& error) {
-          Logger::instance().error("Audio mixer error: " + error);
-        });
-
-        Logger::instance().info("Audio mixer initialized with multiple channels");
-      } else {
-        Logger::instance().error("Failed to initialize audio mixer");
-        m_audioMixer.reset();
-      }
-    }
-
     aaLogDebug("setupChannels",
                  QString("channel objects: video=%1, mediaAudio=%2, systemAudio=%3, speechAudio=%4, "
                      "telephonyAudio=%5, input=%6, microphone=%7, sensor=%8, bluetooth=%9, "
@@ -3807,62 +3751,6 @@ void RealAndroidAutoService::setupChannelsWithTransport() {
       } else {
         Logger::instance().error("Failed to initialize video decoder");
         m_videoDecoder.reset();
-      }
-    }
-
-    // Initialize audio mixer
-    if (m_channelConfig.mediaAudioEnabled || m_channelConfig.systemAudioEnabled ||
-        m_channelConfig.speechAudioEnabled || m_channelConfig.telephonyAudioEnabled) {
-      m_audioMixer = std::make_unique<AudioMixer>(this);
-
-      IAudioMixer::AudioFormat masterFormat;
-      masterFormat.sampleRate = 48000;
-      masterFormat.channels = 2;
-      masterFormat.bitsPerSample = 16;
-
-      if (m_audioMixer->initialize(masterFormat)) {
-        // Add media audio channel (48kHz stereo)
-        if (m_channelConfig.mediaAudioEnabled) {
-          IAudioMixer::ChannelConfig mediaConfig;
-          mediaConfig.id = IAudioMixer::ChannelId::MEDIA;
-          mediaConfig.volume = 0.8f;
-          mediaConfig.priority = 1;
-          mediaConfig.format = masterFormat;
-          m_audioMixer->addChannel(mediaConfig);
-        }
-
-        // Add system audio channel (16kHz mono)
-        if (m_channelConfig.systemAudioEnabled) {
-          IAudioMixer::ChannelConfig systemConfig;
-          systemConfig.id = IAudioMixer::ChannelId::SYSTEM;
-          systemConfig.volume = 1.0f;
-          systemConfig.priority = 2;
-          systemConfig.format = {16000, 1, 16};
-          m_audioMixer->addChannel(systemConfig);
-        }
-
-        // Add speech audio channel (16kHz mono)
-        if (m_channelConfig.speechAudioEnabled) {
-          IAudioMixer::ChannelConfig speechConfig;
-          speechConfig.id = IAudioMixer::ChannelId::SPEECH;
-          speechConfig.volume = 1.0f;
-          speechConfig.priority = 3;
-          speechConfig.format = {16000, 1, 16};
-          m_audioMixer->addChannel(speechConfig);
-        }
-
-        // Connect mixed audio output
-        connect(m_audioMixer.get(), &IAudioMixer::audioMixed, this,
-                [this](const QByteArray& mixedData) { emit audioDataReady(mixedData); });
-
-        connect(m_audioMixer.get(), &IAudioMixer::errorOccurred, this, [](const QString& error) {
-          Logger::instance().error("Audio mixer error: " + error);
-        });
-
-        Logger::instance().info("Audio mixer initialized with multiple channels");
-      } else {
-        Logger::instance().error("Failed to initialize audio mixer");
-        m_audioMixer.reset();
       }
     }
 
@@ -4201,11 +4089,6 @@ void RealAndroidAutoService::cleanupChannels() {
     Logger::instance().info("Video decoder cleaned up");
   }
 
-  if (m_audioMixer) {
-    m_audioMixer->deinitialize();
-    m_audioMixer.reset();
-    Logger::instance().info("Audio mixer cleaned up");
-  }
 
   // Reset all channel pointers
   m_videoChannel.reset();
@@ -4928,9 +4811,9 @@ void RealAndroidAutoService::setChannelConfig(const ChannelConfig& config) {
 
 QJsonObject RealAndroidAutoService::getAudioConfig() const {
   QJsonObject config;
-  // TODO: Get actual audio config from AASDK
-  config["sampleRate"] = 48000;
-  config["channels"] = 2;
+  const AudioStreamFormat media = audioStreamFormat(AAudioStreamRole::MEDIA);
+  config["sampleRate"] = media.sampleRate;
+  config["channels"] = media.channels;
   config["bitsPerSample"] = 16;
   config["codec"] = "PCM";
   return config;
@@ -5139,7 +5022,7 @@ void RealAndroidAutoService::handleConnectionEstablished() {
         [channel](const auto& indication, auto promise) {
           channel->sendMediaAckIndication(indication, std::move(promise));
         },
-        [this](const QByteArray& data) { onSpeechAudioChannelUpdate(data); });
+        [this](const QByteArray& data) { onTelephonyAudioChannelUpdate(data); });
     if (shouldArmInitialNonControlReceives) {
       traceChannelReceiveArm(QStringLiteral("telephonyAudio"), QStringLiteral("initial_connect"));
       m_telephonyAudioChannel->receive(m_telephonyAudioEventHandler);
@@ -6336,14 +6219,6 @@ void RealAndroidAutoService::onVideoFrame(const uint8_t* data, int size, int wid
   updateStats();
 }
 
-void RealAndroidAutoService::onAudioData(const QByteArray& data) {
-  if (!isConnected() || !m_audioEnabled) {
-    return;
-  }
-
-  emit audioDataReady(data);
-}
-
 void RealAndroidAutoService::handleWebRtcSignalingMessage(const QString& topic,
                                                           const QVariantMap& payload) {
   if (!m_webRtcBridge) {
@@ -7408,13 +7283,11 @@ void RealAndroidAutoService::onMediaAudioChannelUpdate(const QByteArray& data) {
 
   if (shouldEmitChannelDebugSample(&m_mediaAudioUpdateCount, &m_lastMediaAudioDebugMs)) {
     aaLogDebug("mediaAudioChannel",
-               QString("sample=%1 bytes=%2 mixer=%3 audioEnabled=%4 payloadCount=%5 mixCount=%6")
+               QString("sample=%1 bytes=%2 audioEnabled=%3 payloadCount=%4")
                    .arg(m_mediaAudioUpdateCount)
                    .arg(data.size())
-                   .arg(m_audioMixer ? QStringLiteral("yes") : QStringLiteral("no"))
                    .arg(m_audioEnabled ? QStringLiteral("yes") : QStringLiteral("no"))
-                   .arg(m_mediaAudioPayloadCount)
-                   .arg(m_mediaAudioMixCount));
+                   .arg(m_mediaAudioPayloadCount));
   }
 
   m_mediaAudioPayloadCount++;
@@ -7431,22 +7304,11 @@ void RealAndroidAutoService::onMediaAudioChannelUpdate(const QByteArray& data) {
             : -1;
     aaLogInfo("mediaAudioChannel",
               QString("First media audio payload accepted bytes=%1 since_discovery_ms=%2 "
-                      "mediaStarted=%3 mixer=%4")
+                      "mediaStarted=%3")
                   .arg(data.size())
                   .arg(sinceDiscoveryMs)
-                  .arg(m_mediaAudioStarted ? QStringLiteral("true") : QStringLiteral("false"))
-                  .arg(m_audioMixer ? QStringLiteral("true") : QStringLiteral("false")));
+                  .arg(m_mediaAudioStarted ? QStringLiteral("true") : QStringLiteral("false")));
     publishProjectionStatus(QStringLiteral("media_audio_first_frame"));
-  }
-
-  if (m_audioMixer) {
-    m_mediaAudioMixCount++;
-    m_audioMixer->mixAudioData(IAudioMixer::ChannelId::MEDIA, data);
-    Logger::instance().debug(QString("Media audio mixed: %1 bytes").arg(data.size()));
-  } else {
-    // Fallback: emit raw audio
-    emit audioDataReady(data);
-    Logger::instance().debug(QString("Media audio: %1 bytes").arg(data.size()));
   }
 }
 
@@ -7457,25 +7319,15 @@ void RealAndroidAutoService::onSystemAudioChannelUpdate(const QByteArray& data) 
 
   if (shouldEmitChannelDebugSample(&m_systemAudioUpdateCount, &m_lastSystemAudioDebugMs)) {
     aaLogDebug("systemAudioChannel",
-               QString("sample=%1 bytes=%2 mixer=%3 audioEnabled=%4")
+               QString("sample=%1 bytes=%2 audioEnabled=%3")
                    .arg(m_systemAudioUpdateCount)
                    .arg(data.size())
-                   .arg(m_audioMixer ? QStringLiteral("yes") : QStringLiteral("no"))
                    .arg(m_audioEnabled ? QStringLiteral("yes") : QStringLiteral("no")));
   }
 
   // PCM audio data from Android device (system sounds, notifications)
   // Route to vehicle audio system via AudioRouter
   routeSystemAudioToVehicle(data);
-
-  if (m_audioMixer) {
-    m_audioMixer->mixAudioData(IAudioMixer::ChannelId::SYSTEM, data);
-    Logger::instance().debug(QString("System audio mixed: %1 bytes").arg(data.size()));
-  } else {
-    // Fallback: emit raw audio
-    emit audioDataReady(data);
-    Logger::instance().debug(QString("System audio: %1 bytes").arg(data.size()));
-  }
 }
 
 void RealAndroidAutoService::onSpeechAudioChannelUpdate(const QByteArray& data) {
@@ -7485,25 +7337,15 @@ void RealAndroidAutoService::onSpeechAudioChannelUpdate(const QByteArray& data) 
 
   if (shouldEmitChannelDebugSample(&m_speechAudioUpdateCount, &m_lastSpeechAudioDebugMs)) {
     aaLogDebug("speechAudioChannel",
-               QString("sample=%1 bytes=%2 mixer=%3 audioEnabled=%4")
+               QString("sample=%1 bytes=%2 audioEnabled=%3")
                    .arg(m_speechAudioUpdateCount)
                    .arg(data.size())
-                   .arg(m_audioMixer ? QStringLiteral("yes") : QStringLiteral("no"))
                    .arg(m_audioEnabled ? QStringLiteral("yes") : QStringLiteral("no")));
   }
 
   // PCM audio data from Android device (navigation guidance, voice assistant)
   // Route to vehicle audio system via AudioRouter with ducking support
   routeGuidanceAudioToVehicle(data);
-
-  if (m_audioMixer) {
-    m_audioMixer->mixAudioData(IAudioMixer::ChannelId::SPEECH, data);
-    Logger::instance().debug(QString("Speech audio mixed: %1 bytes").arg(data.size()));
-  } else {
-    // Fallback: emit raw audio
-    emit audioDataReady(data);
-    Logger::instance().debug(QString("Speech audio: %1 bytes").arg(data.size()));
-  }
 }
 
 void RealAndroidAutoService::onSensorRequest() {
@@ -7933,4 +7775,25 @@ void RealAndroidAutoService::routeSystemAudioToVehicle(const QByteArray& audioDa
   if (!m_audioRouter->routeAudioFrame(AAudioStreamRole::SYSTEM_AUDIO, audioData)) {
     Logger::instance().warning("[RealAndroidAutoService] Failed to route system audio");
   }
+}
+
+void RealAndroidAutoService::routeTelephonyAudioToVehicle(const QByteArray& audioData) {
+  if (!m_audioRouter) {
+    Logger::instance().debug(
+        "[RealAndroidAutoService] AudioRouter not initialised, skipping telephony audio routing");
+    return;
+  }
+
+  // Phone-call audio ducks media but does not hold guidance ducking open.
+  if (!m_audioRouter->routeAudioFrame(AAudioStreamRole::PHONE_CALL, audioData)) {
+    Logger::instance().warning("[RealAndroidAutoService] Failed to route telephony audio");
+  }
+}
+
+void RealAndroidAutoService::onTelephonyAudioChannelUpdate(const QByteArray& data) {
+  if (!m_channelConfig.telephonyAudioEnabled || !m_audioEnabled) {
+    return;
+  }
+
+  routeTelephonyAudioToVehicle(data);
 }

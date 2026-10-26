@@ -27,7 +27,6 @@ class QTimer;
 #include <boost/asio.hpp>
 #include <memory>
 
-#include "../../hal/multimedia/IAudioMixer.h"
 #include "../../hal/multimedia/IVideoDecoder.h"
 #include "AndroidAutoService.h"
 
@@ -298,6 +297,7 @@ class RealAndroidAutoService : public AndroidAutoService {
   void onMediaAudioChannelUpdate(const QByteArray& data);
   void onSystemAudioChannelUpdate(const QByteArray& data);
   void onSpeechAudioChannelUpdate(const QByteArray& data);
+  void onTelephonyAudioChannelUpdate(const QByteArray& data);
   void onSensorRequest();
   void onBluetoothPairingRequest(const QString& deviceName);
   void onChannelError(const QString& channelName, const QString& error);
@@ -323,10 +323,10 @@ class RealAndroidAutoService : public AndroidAutoService {
   void routeMediaAudioToVehicle(const QByteArray& audioData);
   void routeGuidanceAudioToVehicle(const QByteArray& audioData);
   void routeSystemAudioToVehicle(const QByteArray& audioData);
+  void routeTelephonyAudioToVehicle(const QByteArray& audioData);
 
   // AASDK callbacks
   void onVideoFrame(const uint8_t* data, int size, int width, int height);
-  void onAudioData(const QByteArray& data);
   void onUSBHotplug(bool connected);
   void checkForConnectedDevices();  // Fallback device detection
   void ensureAoapRetryResetTimer();
@@ -402,7 +402,6 @@ class RealAndroidAutoService : public AndroidAutoService {
   qint64 m_lastTelemetryBurstCaptureMs{0};
   quint64 m_mediaAudioUpdateCount{0};
   quint64 m_mediaAudioPayloadCount{0};
-  quint64 m_mediaAudioMixCount{0};
   quint64 m_systemAudioUpdateCount{0};
   quint64 m_speechAudioUpdateCount{0};
   quint64 m_sensorRequestCount{0};
@@ -560,7 +559,6 @@ class RealAndroidAutoService : public AndroidAutoService {
 
   // Multimedia components
   std::unique_ptr<IVideoDecoder> m_videoDecoder;
-  std::unique_ptr<IAudioMixer> m_audioMixer;
 
   bool m_isInitialised{false};
   libusb_context* m_libusbContext{nullptr};

@@ -364,7 +364,7 @@ void MockAndroidAutoService::generateTestAudioData() {
     }
   }
 
-  emit audioDataReady(audioData);
+  emit audioFrameRouted(QStringLiteral("media"), sampleRate, 2, audioData);
 }
 
 QImage MockAndroidAutoService::createTestPattern(int frameNumber) {

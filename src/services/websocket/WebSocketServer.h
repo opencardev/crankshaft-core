@@ -295,7 +295,8 @@ class WebSocketServer : public QObject {
   /// Relay: AndroidAuto video frame ready
   void onAndroidAutoVideoFrameReady(int width, int height, const QByteArray& frameData);
   /// Relay: AndroidAuto audio chunk ready
-  void onAndroidAutoAudioDataReady(const QByteArray& data);
+  void onAndroidAutoAudioFrameRouted(const QString& stream, int sampleRate, int channels,
+                                     const QByteArray& data);
   /// Relay: AndroidAuto projection channel status changed
   void onAndroidAutoProjectionStatus(const QJsonObject& status);
 

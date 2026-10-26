@@ -198,9 +198,12 @@ bool AudioHAL::addSource(const QString& name, int sampleRate) {
   gst_caps_unref(inputCaps);
   gst_caps_unref(mixCaps);
 
+  // The bin owns the elements once they are added. On failure they are removed
+  // again, so nothing is left in the pipeline that is not a source.
   gst_bin_add_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
   if (!gst_element_link_many(appsrc, convert, resample, filter, nullptr)) {
     qCritical() << "Failed to link audio source" << name;
+    gst_bin_remove_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
     return false;
   }
 
@@ -211,13 +214,16 @@ bool AudioHAL::addSource(const QString& name, int sampleRate) {
   if (filterSrcPad) {
     gst_object_unref(filterSrcPad);
   }
-  if (mixerPad) {
-    gst_object_unref(mixerPad);
-  }
   if (!linked) {
     qCritical() << "Failed to connect audio source to mixer:" << name;
+    if (mixerPad) {
+      gst_element_release_request_pad(d->mixer, mixerPad);
+      gst_object_unref(mixerPad);
+    }
+    gst_bin_remove_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
     return false;
   }
+  gst_object_unref(mixerPad);
 
   // If the pipeline is already playing, the new elements must follow it.
   for (GstElement* element : {appsrc, convert, resample, filter}) {
