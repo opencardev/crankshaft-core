@@ -126,9 +126,10 @@ Manual checklist:
 ## 13. Known Gaps and Follow-ups
 
 - Router-level ALSA fallback is documented but not explicitly implemented in backend init path.
-- Device ID to Qt `QAudioDevice` mapping may need normalization for non-Qt IDs.
+- Output selection is hardware-unverified: `pulsesink` with a named sink, and hot-plug reconciliation (ADR-0005).
 - Add explicit metrics for backend detection outcomes.
 
 ## 14. Change Log Notes
 
+- 2026-10: Output selection moved to PulseAudio sinks (`pactl`), with the choice applied to `pulsesink` and reconciled on hot-plug (ADR-0005). `AudioRouter::setAudioDevice` and the `AudioHAL` route enum were removed.
 - 2026-06: Added robust socket-first backend detection and runtime-dir candidate fallback to reduce false negatives in systemd service context.

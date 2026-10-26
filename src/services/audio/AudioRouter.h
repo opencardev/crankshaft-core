@@ -19,15 +19,17 @@
 
 #pragma once
 
-#include <QAudioDevice>
 #include <QByteArray>
+#include <QList>
 #include <QObject>
 #include <QString>
-#include <QStringList>
 #include <QVariantMap>
 #include <atomic>
 
+#include "AudioOutputs.h"
+
 class MediaPipeline;
+class QProcess;
 class QTimer;
 
 /**
@@ -97,17 +99,29 @@ class AudioRouter : public QObject {
   auto routeAudioFrame(AAudioStreamRole role, const QByteArray& audioData) -> bool;
 
   /**
-   * @brief Record the preferred output device.
-   *
-   * Output selection currently follows the system default sink, so the device is
-   * validated and stored but not yet pinned in the pipeline.
+   * @brief Outputs present at the last listing: direct-attached and Bluetooth sinks.
    */
-  auto setAudioDevice(AAudioStreamRole role, const QString& deviceId) -> bool;
+  [[nodiscard]] auto outputs() const -> QList<AudioOutput>;
+  [[nodiscard]] auto hasOutput(const QString& id) const -> bool;
 
   /**
-   * @brief Get list of available audio output devices
+   * @brief Choose the output for all audio. An empty id selects the system default.
+   *
+   * Applies to everything the pipeline plays, so every source follows the choice.
+   * The choice is remembered. While the chosen output is missing, audio plays on the
+   * system default, and the choice is applied again when the output reappears.
+   *
+   * @return false if the output is not in the current listing, or its sink could not
+   *         be opened. A missing output leaves the current choice unchanged. A sink
+   *         that cannot be opened is still remembered, and audio plays on the default.
    */
-  [[nodiscard]] auto getAvailableAudioDevices() const -> QStringList;
+  auto setOutputDevice(const QString& id) -> bool;
+
+  /** @brief The chosen output. Empty means the system default. */
+  [[nodiscard]] auto outputDevice() const -> QString;
+
+  /** @brief The output in use. Empty means the system default. */
+  [[nodiscard]] auto activeOutput() const -> QString;
 
   /** @brief Master volume, 0-100. */
   auto setVolume(int percent) -> bool;
@@ -147,6 +161,11 @@ class AudioRouter : public QObject {
    */
   void frameRouted(const QString& stream, int sampleRate, int channels, const QByteArray& pcm);
 
+  /**
+   * @brief Emitted when the list of outputs or the output in use changes.
+   */
+  void outputsChanged();
+
  private:
   auto initializePipeWire() -> bool;
   auto initializePulseAudio() -> bool;
@@ -154,13 +173,27 @@ class AudioRouter : public QObject {
   auto applyStoredState() -> void;
   auto schedulePersist() -> void;
   auto persistState() -> void;
+  auto refreshOutputs() -> void;
+  auto applyOutput(const QString& id) -> bool;
+  auto reconcileOutput() -> void;
+
+ private slots:
+  void onSinkListFinished();
 
   MediaPipeline* m_mediaPipeline = nullptr;
   QTimer* m_saveTimer = nullptr;
+  QTimer* m_outputPollTimer = nullptr;
+  QProcess* m_listProcess = nullptr;
   bool m_initialized = false;
   bool m_pipewireAvailable = false;
   bool m_pulseaudioAvailable = false;
-  QAudioDevice m_preferredDevice;
+
+  // Written on the main thread only (startup, WebSocket commands and the poll timer).
+  QList<AudioOutput> m_outputs;
+  QString m_preferredOutput;
+
+  // How often the output list is re-read, so Bluetooth and hot-plugged outputs appear.
+  static constexpr int kOutputPollMs = 5000;
 
   // Read from the Android Auto transport thread and written from the WebSocket
   // thread, so these are atomic.

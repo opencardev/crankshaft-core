@@ -2982,6 +2982,7 @@ RealAndroidAutoService::RealAndroidAutoService(MediaPipeline* mediaPipeline, QOb
   // Initialize AudioRouter for AA audio channel management
   m_audioRouter = new AudioRouter(mediaPipeline, this);
   connect(m_audioRouter, &AudioRouter::frameRouted, this, &AndroidAutoService::audioFrameRouted);
+  connect(m_audioRouter, &AudioRouter::outputsChanged, this, &AndroidAutoService::audioStateChanged);
   if (!m_audioRouter->initialize()) {
     Logger::instance().warning(
         "[RealAndroidAutoService] Failed to initialize AudioRouter - audio may not work");

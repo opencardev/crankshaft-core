@@ -29,25 +29,6 @@ find_package(GStreamerAudio 1.0 REQUIRED)
 # Find DBus for network/Bluetooth management
 find_package(DBus1 REQUIRED)
 
-# Audio implementation with GStreamer and ALSA
-add_library(audio-impl STATIC
-    AudioManagerImpl.cpp
-    AudioDeviceImpl.cpp
-)
-
-target_link_libraries(audio-impl
-    Qt6::Core
-    Qt6::Network
-    GStreamer::Core
-    GStreamer::Audio
-    GStreamer::App
-)
-
-target_include_directories(audio-impl PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ../multimedia
-)
-
 # Video implementation with GStreamer
 add_library(video-impl STATIC
     VideoManagerImpl.cpp
@@ -118,7 +99,6 @@ target_include_directories(network-service PUBLIC
 
 # Expose all implementation libraries
 set(CRANKSHAFT_HAL_FUNCTIONAL_LIBS
-    audio-impl
     video-impl
     wifi-impl
     bluetooth-impl

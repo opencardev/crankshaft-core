@@ -23,19 +23,19 @@
 
 #include <algorithm>
 
-#include <QAudioDevice>
 #include <QDateTime>
 #include <QFileInfo>
-#include <QMediaDevices>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
 
 #include "../../hal/multimedia/MediaPipeline.h"
 #include "../config/ConfigService.h"
 #include "../logging/Logger.h"
 #include "AudioMath.h"
+#include "AudioOutputs.h"
 
 namespace {
 
@@ -72,6 +72,7 @@ constexpr auto kStateKeyVolume = "core.audio.volume";
 constexpr auto kStateKeyMuted = "core.audio.muted";
 constexpr auto kStateKeyBalance = "core.audio.balance";
 constexpr auto kStateKeyDucking = "core.audio.ducking_enabled";
+constexpr auto kStateKeyOutput = "core.audio.output";
 constexpr int kPersistDebounceMs = 500;
 
 QStringList runtimeDirCandidates() {
@@ -95,6 +96,29 @@ QStringList runtimeDirCandidates() {
   return candidates;
 }
 
+// Environment for pactl, so it reaches the same PulseAudio or PipeWire server as
+// the probe in initializePulseAudio().
+QProcessEnvironment pactlEnvironment() {
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  const QStringList runtimeDirs = runtimeDirCandidates();
+  if (!runtimeDirs.isEmpty()) {
+    const QString runtimeDir = runtimeDirs.first();
+    env.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtimeDir);
+    if (!env.contains(QStringLiteral("PULSE_SERVER"))) {
+      env.insert(QStringLiteral("PULSE_SERVER"),
+                 QStringLiteral("unix:%1/pulse/native").arg(runtimeDir));
+    }
+  }
+  return env;
+}
+
+bool sameOutputs(const QList<AudioOutput>& a, const QList<AudioOutput>& b) {
+  return std::equal(a.cbegin(), a.cend(), b.cbegin(), b.cend(),
+                    [](const AudioOutput& x, const AudioOutput& y) {
+                      return x.id == y.id && x.name == y.name && x.bluetooth == y.bluetooth;
+                    });
+}
+
 }  // namespace
 
 AudioRouter::AudioRouter(MediaPipeline* mediaPipeline, QObject* parent)
@@ -108,6 +132,10 @@ AudioRouter::AudioRouter(MediaPipeline* mediaPipeline, QObject* parent)
   m_saveTimer->setSingleShot(true);
   m_saveTimer->setInterval(kPersistDebounceMs);
   connect(m_saveTimer, &QTimer::timeout, this, &AudioRouter::persistState);
+
+  m_outputPollTimer = new QTimer(this);
+  m_outputPollTimer->setInterval(kOutputPollMs);
+  connect(m_outputPollTimer, &QTimer::timeout, this, &AudioRouter::refreshOutputs);
 }
 
 AudioRouter::~AudioRouter() {
@@ -142,19 +170,15 @@ bool AudioRouter::initialize() {
     Logger::instance().warning(QStringLiteral("[AudioRouter] No audio backend available"));
   }
 
-  const auto& devices = QMediaDevices::audioOutputs();
-  Logger::instance().info(QStringLiteral("[AudioRouter] Found %1 audio output devices")
-                              .arg(static_cast<qlonglong>(devices.size())));
-  for (const auto& device : devices) {
-    Logger::instance().debug(QStringLiteral("[AudioRouter] Device: %1 (%2 channels)")
-                                 .arg(device.description())
-                                 .arg(device.maximumChannelCount()));
-  }
-
   createMixerSources();
   applyStoredState();
 
   m_initialized = m_pipewireAvailable || m_pulseaudioAvailable;
+  if (m_initialized) {
+    // The first listing applies the saved output once the sinks are known.
+    refreshOutputs();
+    m_outputPollTimer->start();
+  }
   return m_initialized;
 }
 
@@ -191,6 +215,7 @@ void AudioRouter::applyStoredState() {
   m_balance.store(audio_math::clampBalance(
       config.get(QString::fromLatin1(kStateKeyBalance), 0).toInt()));
   m_duckingEnabled.store(config.get(QString::fromLatin1(kStateKeyDucking), true).toBool());
+  m_preferredOutput = config.get(QString::fromLatin1(kStateKeyOutput), QString()).toString();
 
   if (m_mediaPipeline) {
     AudioHAL* audioHal = m_mediaPipeline->audioHAL();
@@ -211,6 +236,7 @@ void AudioRouter::persistState() {
   config.set(QString::fromLatin1(kStateKeyMuted), m_muted.load());
   config.set(QString::fromLatin1(kStateKeyBalance), m_balance.load());
   config.set(QString::fromLatin1(kStateKeyDucking), m_duckingEnabled.load());
+  config.set(QString::fromLatin1(kStateKeyOutput), m_preferredOutput);
 
   const QString path = config.loadedFilePath();
   if (!path.isEmpty() && !config.save(path)) {
@@ -279,17 +305,7 @@ bool AudioRouter::initializePulseAudio() {
 
   // Check if PulseAudio daemon is available via pactl
   QProcess paProcess;
-  const QStringList runtimeDirs = runtimeDirCandidates();
-  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  if (!runtimeDirs.isEmpty()) {
-    const QString runtimeDir = runtimeDirs.first();
-    env.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtimeDir);
-    if (!env.contains(QStringLiteral("PULSE_SERVER"))) {
-      env.insert(QStringLiteral("PULSE_SERVER"),
-                 QStringLiteral("unix:%1/pulse/native").arg(runtimeDir));
-    }
-  }
-  paProcess.setProcessEnvironment(env);
+  paProcess.setProcessEnvironment(pactlEnvironment());
   paProcess.setProgram(QStringLiteral("pactl"));
   paProcess.setArguments(QStringList() << QStringLiteral("info"));
   paProcess.start();
@@ -371,48 +387,112 @@ bool AudioRouter::routeAudioFrame(AAudioStreamRole role, const QByteArray& audio
   return true;
 }
 
-bool AudioRouter::setAudioDevice(AAudioStreamRole role, const QString& deviceId) {
-  if (role != AAudioStreamRole::MEDIA) {
-    Logger::instance().warning(
-        QStringLiteral("[AudioRouter] Only the media role has a selectable output device"));
+QList<AudioOutput> AudioRouter::outputs() const {
+  return m_outputs;
+}
+
+bool AudioRouter::hasOutput(const QString& id) const {
+  return std::any_of(m_outputs.cbegin(), m_outputs.cend(),
+                     [&](const AudioOutput& output) { return output.id == id; });
+}
+
+bool AudioRouter::setOutputDevice(const QString& id) {
+  if (!id.isEmpty() && !hasOutput(id)) {
+    Logger::instance().warning(QStringLiteral("[AudioRouter] Audio output not found: %1").arg(id));
     return false;
   }
 
-  const auto& devices = QMediaDevices::audioOutputs();
-  QAudioDevice device;
-
-  if (deviceId.isEmpty()) {
-    device = QMediaDevices::defaultAudioOutput();
-  } else {
-    // Qt device ids are backend sink names. A Bluetooth MAC address appears in
-    // the BlueZ sink name with ':' replaced by '_', so match on that form too.
-    const QString macAsSinkFragment = QString(deviceId).replace(QLatin1Char(':'), QLatin1Char('_'));
-    const auto match = std::find_if(devices.begin(), devices.end(), [&](const QAudioDevice& dev) {
-      const QString id = QString::fromUtf8(dev.id());
-      return id == deviceId || id.contains(macAsSinkFragment, Qt::CaseInsensitive);
-    });
-
-    if (match == devices.end()) {
-      Logger::instance().error(
-          QStringLiteral("[AudioRouter] Audio device not found: %1").arg(deviceId));
-      return false;
-    }
-    device = *match;
-  }
-
-  m_preferredDevice = device;
-  Logger::instance().info(QStringLiteral("[AudioRouter] Preferred output device: %1 "
-                                         "(pipeline sink follows system default)")
-                              .arg(device.description()));
-  return true;
+  // The choice is kept even if the sink cannot be opened now, so it is applied again
+  // when the output next appears in a listing.
+  m_preferredOutput = id;
+  schedulePersist();
+  const bool applied = applyOutput(id);
+  emit outputsChanged();
+  return applied;
 }
 
-QStringList AudioRouter::getAvailableAudioDevices() const {
-  QStringList devices;
-  for (const auto& output : QMediaDevices::audioOutputs()) {
-    devices.append(output.description());
+QString AudioRouter::outputDevice() const {
+  return m_preferredOutput;
+}
+
+QString AudioRouter::activeOutput() const {
+  if (!m_mediaPipeline) {
+    return QString();
   }
-  return devices;
+  return m_mediaPipeline->audioHAL()->outputDevice();
+}
+
+bool AudioRouter::applyOutput(const QString& id) {
+  if (!m_mediaPipeline) {
+    return false;
+  }
+
+  if (m_mediaPipeline->audioHAL()->setOutputDevice(id)) {
+    Logger::instance().info(QStringLiteral("[AudioRouter] Audio output: %1")
+                                .arg(id.isEmpty() ? QStringLiteral("system default") : id));
+    return true;
+  }
+
+  Logger::instance().warning(QStringLiteral("[AudioRouter] Could not open audio output %1; "
+                                            "playing on the system default")
+                                 .arg(id));
+  return false;
+}
+
+void AudioRouter::reconcileOutput() {
+  // Use the chosen output while it is present. Otherwise play on the system default,
+  // keeping the choice so it applies again when the output returns.
+  const bool preferredPresent = m_preferredOutput.isEmpty() || hasOutput(m_preferredOutput);
+  const QString target = preferredPresent ? m_preferredOutput : QString();
+  if (target == activeOutput()) {
+    return;
+  }
+  applyOutput(target);
+}
+
+void AudioRouter::refreshOutputs() {
+  if (!m_mediaPipeline || (m_listProcess && m_listProcess->state() != QProcess::NotRunning)) {
+    return;
+  }
+
+  if (!m_listProcess) {
+    m_listProcess = new QProcess(this);
+    connect(m_listProcess, &QProcess::finished, this, &AudioRouter::onSinkListFinished);
+  }
+
+  m_listProcess->setProcessEnvironment(pactlEnvironment());
+  m_listProcess->start(QStringLiteral("pactl"),
+                       QStringList() << QStringLiteral("-f") << QStringLiteral("json")
+                                     << QStringLiteral("list") << QStringLiteral("sinks"));
+}
+
+void AudioRouter::onSinkListFinished() {
+  // shutdown() kills a listing that is still running; its finished signal then arrives
+  // after the router has stopped, and must not touch the sink.
+  if (!m_initialized) {
+    return;
+  }
+
+  const bool listed =
+      m_listProcess->exitStatus() == QProcess::NormalExit && m_listProcess->exitCode() == 0;
+  if (!listed) {
+    Logger::instance().debug(QStringLiteral("[AudioRouter] Could not list audio outputs: %1")
+                                 .arg(QString::fromUtf8(m_listProcess->readAllStandardError())
+                                          .trimmed()));
+  }
+
+  // A failed listing means no outputs are visible, so the sink falls back to the default.
+  const QList<AudioOutput> found =
+      listed ? parsePactlSinks(m_listProcess->readAllStandardOutput()) : QList<AudioOutput>();
+  if (sameOutputs(found, m_outputs)) {
+    return;
+  }
+
+  m_outputs = found;
+  Logger::instance().info(QStringLiteral("[AudioRouter] Audio outputs changed: %1 found")
+                              .arg(static_cast<qlonglong>(m_outputs.size())));
+  reconcileOutput();
+  emit outputsChanged();
 }
 
 bool AudioRouter::setVolume(int percent) {
@@ -489,6 +569,18 @@ QVariantMap AudioRouter::stateSnapshot() const {
   state[QStringLiteral("muted")] = m_muted.load();
   state[QStringLiteral("balance")] = m_balance.load();
   state[QStringLiteral("ducking_enabled")] = m_duckingEnabled.load();
+
+  QVariantList outputList;
+  for (const AudioOutput& output : m_outputs) {
+    QVariantMap entry;
+    entry[QStringLiteral("id")] = output.id;
+    entry[QStringLiteral("name")] = output.name;
+    entry[QStringLiteral("bluetooth")] = output.bluetooth;
+    outputList.append(entry);
+  }
+  state[QStringLiteral("outputs")] = outputList;
+  state[QStringLiteral("output")] = m_preferredOutput;
+  state[QStringLiteral("active_output")] = activeOutput();
   return state;
 }
 
@@ -498,6 +590,11 @@ bool AudioRouter::shutdown() {
   }
 
   Logger::instance().info(QStringLiteral("[AudioRouter] Shutting down audio router"));
+
+  m_outputPollTimer->stop();
+  if (m_listProcess && m_listProcess->state() != QProcess::NotRunning) {
+    m_listProcess->kill();
+  }
 
   if (m_mediaPipeline && m_mediaPipeline->isActive()) {
     m_mediaPipeline->stop();

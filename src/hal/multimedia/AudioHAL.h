@@ -33,9 +33,6 @@ class AudioHAL : public QObject {
   Q_OBJECT
 
  public:
-  enum class AudioRoute { Default, Speakers, Headphones, Bluetooth, USB };
-  Q_ENUM(AudioRoute)
-
   explicit AudioHAL(QObject* parent = nullptr);
   ~AudioHAL() override;
 
@@ -45,8 +42,20 @@ class AudioHAL : public QObject {
   auto setMute(bool muted) -> bool;
   auto isMuted() const -> bool;
 
-  auto setRoute(AudioRoute route) -> bool;
-  AudioRoute getCurrentRoute() const;
+  /**
+   * @brief Select the output sink for everything the pipeline plays.
+   *
+   * An empty name selects the system default sink. Any other name is a PulseAudio
+   * sink, which may be direct-attached or Bluetooth, and is opened with pulsesink.
+   * If the named sink cannot be used, the pipeline falls back to the system default
+   * and this returns false.
+   *
+   * @return true if the requested sink is now in use
+   */
+  auto setOutputDevice(const QString& sinkName) -> bool;
+
+  /** @brief Sink in use: the PulseAudio sink name, or empty for the system default. */
+  [[nodiscard]] auto outputDevice() const -> QString;
 
   auto startStream(const QString& streamName, int sampleRate, int channels) -> bool;
   auto stopStream(const QString& streamName) -> bool;
@@ -64,15 +73,12 @@ class AudioHAL : public QObject {
    */
   auto pushAudioData(const QString& source, const QByteArray& data) -> bool;
 
-  QStringList getAvailableDevices() const;
-
  signals:
   void errorOccurred(const QString& message);
   void streamStarted(const QString& streamName);
   void streamStopped(const QString& streamName);
   void volumeChanged(int volume);
   void muteChanged(bool muted);
-  void routeChanged(AudioRoute route);
 
  private:
   auto initializePipeline() -> bool;

@@ -290,6 +290,11 @@ class AndroidAutoService : public QObject {
                         const QByteArray& data);
 
   /**
+   * @brief Emitted when audio state a client can see changes, such as the output list
+   */
+  void audioStateChanged();
+
+  /**
    * @brief Emitted when service error occurs
    */
   void errorOccurred(const QString& error);

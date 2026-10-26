@@ -846,6 +846,18 @@ void WebSocketServer::handleAudioPublish(const QString& topic, const QVariantMap
     if (enabled.typeId() == QMetaType::Bool) {
       accepted = router->enableAudioDucking(enabled.toBool());
     }
+  } else if (topic == QStringLiteral("audio/output/set")) {
+    // An empty device selects the system default. Any other id must be in the listing.
+    const QVariant device = payload.value(QStringLiteral("device"));
+    if (device.typeId() == QMetaType::QString) {
+      const QString id = device.toString();
+      if (id.isEmpty() || router->hasOutput(id)) {
+        accepted = router->setOutputDevice(id);
+        reason = QStringLiteral("output_unavailable");
+      } else {
+        reason = QStringLiteral("output_not_found");
+      }
+    }
   } else {
     reason = QStringLiteral("unknown_audio_topic");
   }
@@ -1391,6 +1403,12 @@ void WebSocketServer::setupAndroidAutoConnections() {
           });
   connect(aaService, &AndroidAutoService::audioFrameRouted, this,
           &WebSocketServer::onAndroidAutoAudioFrameRouted);
+  connect(aaService, &AndroidAutoService::audioStateChanged, this, [this]() {
+    AudioRouter* router = m_serviceManager ? m_serviceManager->getAudioRouter() : nullptr;
+    if (router) {
+      broadcastEvent(QStringLiteral("audio/state"), router->stateSnapshot());
+    }
+  });
   connect(aaService, &AndroidAutoService::projectionStatusChanged, this,
           &WebSocketServer::onAndroidAutoProjectionStatus);
     connect(aaService, &AndroidAutoService::webRtcSignalingMessage, this,

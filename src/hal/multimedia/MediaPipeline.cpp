@@ -29,7 +29,6 @@ MediaPipeline::MediaPipeline(QObject* parent)
   // Connect audio HAL signals
   connect(m_audioHAL, &AudioHAL::volumeChanged, this, &MediaPipeline::onAudioVolumeChanged);
   connect(m_audioHAL, &AudioHAL::muteChanged, this, &MediaPipeline::onAudioMuteChanged);
-  connect(m_audioHAL, &AudioHAL::routeChanged, this, &MediaPipeline::onAudioRouteChanged);
   connect(m_audioHAL, &AudioHAL::streamStarted, this, &MediaPipeline::onAudioStreamStarted);
   connect(m_audioHAL, &AudioHAL::streamStopped, this, &MediaPipeline::onAudioStreamStopped);
   connect(m_audioHAL, &AudioHAL::errorOccurred, this, &MediaPipeline::onAudioError);
@@ -59,7 +58,6 @@ bool MediaPipeline::start(const MediaConfig& config) {
   // Configure and start audio
   if (config.enableAudio) {
     m_audioHAL->setVolume(config.audioVolume);
-    m_audioHAL->setRoute(config.audioRoute);
 
     if (!m_audioHAL->startStream(config.streamName, config.audioSampleRate, config.audioChannels)) {
       // Keep video and the Android Auto session running without audio, rather than failing the pipeline.
@@ -148,9 +146,6 @@ bool MediaPipeline::updateConfig(const MediaConfig& config) {
     if (config.audioVolume != m_config.audioVolume) {
       m_audioHAL->setVolume(config.audioVolume);
     }
-    if (config.audioRoute != m_config.audioRoute) {
-      m_audioHAL->setRoute(config.audioRoute);
-    }
   }
 
   // Update video settings without restarting
@@ -178,11 +173,6 @@ void MediaPipeline::onAudioVolumeChanged(int volume) {
 
 void MediaPipeline::onAudioMuteChanged(bool muted) {
   emit audioMuteChanged(muted);
-}
-
-void MediaPipeline::onAudioRouteChanged(AudioHAL::AudioRoute route) {
-  m_config.audioRoute = route;
-  emit audioRouteChanged(route);
 }
 
 void MediaPipeline::onAudioStreamStarted(const QString& streamName) {

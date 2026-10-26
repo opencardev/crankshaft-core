@@ -61,7 +61,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json nlohmann_json_schema_validator)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network WebSockets Gui DBus Bluetooth Sql Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Network WebSockets Gui DBus Bluetooth Sql)
 
 # Find GStreamer for multimedia
 find_package(PkgConfig REQUIRED)
@@ -112,8 +112,7 @@ set(CORE_SOURCES
   services/preferences/PreferencesService.cpp
   services/session/SessionStore.cpp
   services/audio/AudioRouter.cpp
-  services/bluetooth/BluetoothService.cpp
-  services/media/MediaService.cpp
+  services/audio/AudioOutputs.cpp
   services/extensions/ExtensionManager.cpp
   services/diagnostics/DiagnosticsEndpoint.cpp
 
@@ -226,7 +225,6 @@ set_target_properties(crankshaft-core PROPERTIES
 
 target_link_libraries(crankshaft-core-lib PUBLIC
   Qt6::Core
-  Qt6::Multimedia
 )
 
 target_link_libraries(crankshaft-core-lib PRIVATE
@@ -350,7 +348,7 @@ set(CPACK_PACKAGE_VERSION "${CRANKSHAFT_CORE_VERSION}")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 # Keep explicit Qt/system runtime dependencies and allow both legacy and t64
 # package names so dependencies resolve across Debian/Ubuntu releases.
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64, libqt6core6 | libqt6core6t64, libqt6network6 | libqt6network6t64, libqt6websockets6 | libqt6websockets6t64, libqt6gui6 | libqt6gui6t64, libqt6dbus6 | libqt6dbus6t64, libqt6sql6 | libqt6sql6t64, libqt6bluetooth6 | libqt6bluetooth6t64, libqt6multimedia6 | libqt6multimedia6t64, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, libgstreamer1.0-0 | libgstreamer1.0-0t64, libgstreamer-plugins-base1.0-0 | libgstreamer-plugins-base1.0-0t64, libgstreamer-plugins-bad1.0-0 | libgstreamer-plugins-bad1.0-0t64, libnice10 | libnice10t64, libsrtp2-1 | libsrtp2-1t64, dbus, libusb-1.0-0, libssl3 | libssl3t64, libprotobuf32 | libprotobuf32t64, libasound2 | libasound2t64, libpulse0 | libpulse0t64")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaasdk | libaasdk-amd64, libqt6core6 | libqt6core6t64, libqt6network6 | libqt6network6t64, libqt6websockets6 | libqt6websockets6t64, libqt6gui6 | libqt6gui6t64, libqt6dbus6 | libqt6dbus6t64, libqt6sql6 | libqt6sql6t64, libqt6bluetooth6 | libqt6bluetooth6t64, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, libgstreamer1.0-0 | libgstreamer1.0-0t64, libgstreamer-plugins-base1.0-0 | libgstreamer-plugins-base1.0-0t64, libgstreamer-plugins-bad1.0-0 | libgstreamer-plugins-bad1.0-0t64, libnice10 | libnice10t64, libsrtp2-1 | libsrtp2-1t64, dbus, libusb-1.0-0, libssl3 | libssl3t64, libprotobuf32 | libprotobuf32t64, libasound2 | libasound2t64, libpulse0 | libpulse0t64")
 set(CPACK_COMPONENTS_ALL core)
 
 # Resolve Debian package architecture for filename generation

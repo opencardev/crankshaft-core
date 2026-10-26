@@ -36,7 +36,6 @@ struct MediaConfig {
   // Audio configuration
   bool enableAudio = false;
   int audioVolume = 100;
-  AudioHAL::AudioRoute audioRoute = AudioHAL::AudioRoute::Default;
   int audioSampleRate = 48000;
   int audioChannels = 2;
 
@@ -112,7 +111,6 @@ class MediaPipeline : public QObject {
   void configUpdated();
   void audioVolumeChanged(int volume);
   void audioMuteChanged(bool muted);
-  void audioRouteChanged(AudioHAL::AudioRoute route);
   void videoResolutionChanged(VideoHAL::VideoResolution resolution);
   void videoBrightnessChanged(int brightness);
   void videoContrastChanged(int contrast);
@@ -122,7 +120,6 @@ class MediaPipeline : public QObject {
  private slots:
   void onAudioVolumeChanged(int volume);
   void onAudioMuteChanged(bool muted);
-  void onAudioRouteChanged(AudioHAL::AudioRoute route);
   void onAudioStreamStarted(const QString& streamName);
   void onAudioStreamStopped(const QString& streamName);
   void onAudioError(const QString& error);
