@@ -25,6 +25,8 @@
 #include <QVector>
 #include <memory>
 
+#include "BluetoothPairingPrompts.h"
+
 /**
  * @brief Bluetooth device manager
  *
@@ -168,6 +170,12 @@ class BluetoothManager : public QObject {
    */
   virtual bool disconnectAudio(const QString& address, AudioProfile profile) = 0;
 
+  /**
+   * @brief Answer a pairing prompt that BlueZ is waiting on. See PairingResponse.
+   */
+  virtual PairingResponse respondToPairing(const QString& id, bool accepted,
+                                           const QString& answer) = 0;
+
  signals:
   /**
    * @brief Emitted when Bluetooth state changes
@@ -223,6 +231,26 @@ class BluetoothManager : public QObject {
    * @brief Emitted when Bluetooth error occurs
    */
   void errorOccurred(const QString& error);
+
+  /**
+   * @brief Pairing did not complete. The device was not paired.
+   */
+  void pairingFailed(const QString& address, const QString& error);
+
+  /**
+   * @brief BlueZ needs an answer from the user (PIN, passkey, or confirmation).
+   */
+  void pairingPromptRequested(const PairingPrompt& prompt);
+
+  /**
+   * @brief Show a code the user must type on the device. No answer is needed.
+   */
+  void pairingDisplayRequested(const QString& address, const QString& code);
+
+  /**
+   * @brief A pairing prompt is no longer pending: answered, declined, or timed out.
+   */
+  void pairingPromptClosed(const QString& id);
 };
 
 using BluetoothManagerPtr = std::shared_ptr<BluetoothManager>;

@@ -142,6 +142,8 @@ set(CORE_SOURCES
   # Wireless HAL
   hal/wireless/WiFiHAL.cpp
   hal/wireless/BluetoothHAL.cpp
+  hal/wireless/BluetoothPairingAgent.cpp
+  hal/wireless/BluetoothPairingPrompts.cpp
   hal/wireless/NetworkService.cpp
   hal/wireless/WiFiManager.cpp
   hal/wireless/BluetoothManager.cpp

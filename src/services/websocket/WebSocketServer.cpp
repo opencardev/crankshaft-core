@@ -39,6 +39,7 @@
 #include "../logging/Logger.h"
 #include "../service_manager/ServiceManager.h"
 #include "../../hal/wireless/BluetoothManager.h"
+#include "../../hal/wireless/BluetoothPairingPrompts.h"
 
 static auto normaliseVendorFilterList(const QVariant& rawValue) -> QStringList {
   QStringList values;
@@ -689,6 +690,10 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
       }
     }
 
+    if (bluetoothManager && bluetoothManager != m_pairingSignalsManager) {
+      connectBluetoothPairingSignals(bluetoothManager);
+    }
+
     if (!bluetoothManager) {
       broadcastEvent(QStringLiteral("bluetooth/error"),
                      QVariantMap{{QStringLiteral("error"),
@@ -745,14 +750,14 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
                                             payload.value(QStringLiteral("id")))
                                   .toString();
       const QString name = payload.value(QStringLiteral("name"), address).toString();
-      const bool success = !address.isEmpty() && bluetoothManager->pair(address);
-      broadcastEvent(QStringLiteral("bluetooth/pair/result"),
-                     QVariantMap{{QStringLiteral("success"), success},
-                                 {QStringLiteral("id"), address},
-                                 {QStringLiteral("address"), address},
-                                 {QStringLiteral("name"), name},
-                                 {QStringLiteral("error"),
-                                  success ? QString() : QStringLiteral("Failed to pair Bluetooth device")}});
+      if (address.isEmpty() || !bluetoothManager->pair(address)) {
+        broadcastPairResult(address, name, false, QStringLiteral("Failed to pair Bluetooth device"));
+      } else {
+        // The outcome comes later, from devicePaired or pairingFailed.
+        m_pendingPairNames.insert(address, name);
+      }
+    } else if (topic == QStringLiteral("bluetooth/pairing/respond")) {
+      handlePairingResponse(bluetoothManager, payload);
     } else if (topic == QStringLiteral("bluetooth/connect")) {
       const QString address = payload.value(QStringLiteral("address"),
                                             payload.value(QStringLiteral("id")))
@@ -846,6 +851,11 @@ void WebSocketServer::handleAudioPublish(const QString& topic, const QVariantMap
     if (enabled.typeId() == QMetaType::Bool) {
       accepted = router->enableAudioDucking(enabled.toBool());
     }
+  } else if (topic == QStringLiteral("audio/bluetooth_auto_select/set")) {
+    const QVariant enabled = payload.value(QStringLiteral("enabled"));
+    if (enabled.typeId() == QMetaType::Bool) {
+      accepted = router->setBluetoothAutoSelect(enabled.toBool());
+    }
   } else if (topic == QStringLiteral("audio/output/set")) {
     // An empty device selects the system default. Any other id must be in the listing.
     const QVariant device = payload.value(QStringLiteral("device"));
@@ -874,6 +884,87 @@ void WebSocketServer::handleAudioPublish(const QString& topic, const QVariantMap
   }
 
   broadcastEvent(QStringLiteral("audio/state"), router->stateSnapshot());
+}
+
+void WebSocketServer::connectBluetoothPairingSignals(BluetoothManager* manager) {
+  m_pairingSignalsManager = manager;
+
+  connect(manager, &BluetoothManager::devicePaired, this, [this](const QString& address) {
+    broadcastPairResult(address, m_pendingPairNames.take(address), true, QString());
+  });
+  connect(manager, &BluetoothManager::pairingFailed, this,
+          [this](const QString& address, const QString& error) {
+            broadcastPairResult(address, m_pendingPairNames.take(address), false,
+                                error.isEmpty() ? QStringLiteral("Failed to pair Bluetooth device")
+                                                : error);
+          });
+  connect(manager, &BluetoothManager::pairingPromptRequested, this,
+          [this](const PairingPrompt& prompt) {
+            const QString name = m_pendingPairNames.value(prompt.address);
+            QVariantMap payload{
+                {QStringLiteral("id"), prompt.id},
+                {QStringLiteral("kind"), pairingPromptKindName(prompt.kind)},
+                {QStringLiteral("address"), prompt.address},
+                {QStringLiteral("name"), name.isEmpty() ? prompt.address : name},
+                {QStringLiteral("timeout_seconds"),
+                 static_cast<int>((prompt.deadlineMs - QDateTime::currentMSecsSinceEpoch()) / 1000)}};
+            if (!prompt.passkey.isEmpty()) {
+              payload[QStringLiteral("passkey")] = prompt.passkey;
+            }
+            broadcastEvent(QStringLiteral("bluetooth/pairing/request"), payload);
+          });
+  connect(manager, &BluetoothManager::pairingDisplayRequested, this,
+          [this](const QString& address, const QString& code) {
+            broadcastEvent(QStringLiteral("bluetooth/pairing/display"),
+                           QVariantMap{{QStringLiteral("address"), address},
+                                       {QStringLiteral("code"), code}});
+          });
+  connect(manager, &BluetoothManager::pairingPromptClosed, this, [this](const QString& id) {
+    broadcastEvent(QStringLiteral("bluetooth/pairing/closed"),
+                   QVariantMap{{QStringLiteral("id"), id}});
+  });
+}
+
+void WebSocketServer::broadcastPairResult(const QString& address, const QString& name,
+                                          bool success, const QString& error) {
+  broadcastEvent(QStringLiteral("bluetooth/pair/result"),
+                 QVariantMap{{QStringLiteral("success"), success},
+                             {QStringLiteral("id"), address},
+                             {QStringLiteral("address"), address},
+                             {QStringLiteral("name"), name.isEmpty() ? address : name},
+                             {QStringLiteral("error"), error}});
+}
+
+void WebSocketServer::handlePairingResponse(BluetoothManager* manager,
+                                            const QVariantMap& payload) {
+  // Parse, then hand the answer to the agent, which checks it against the pending prompt.
+  // The answer text is never logged.
+  const QVariant idValue = payload.value(QStringLiteral("id"));
+  const QVariant acceptValue = payload.value(QStringLiteral("accept"));
+  const QString id = idValue.toString();
+  if (idValue.typeId() != QMetaType::QString || id.isEmpty() ||
+      acceptValue.typeId() != QMetaType::Bool) {
+    broadcastEvent(QStringLiteral("bluetooth/pairing/rejected"),
+                   QVariantMap{{QStringLiteral("id"), id},
+                               {QStringLiteral("reason"), QStringLiteral("invalid_payload")}});
+    return;
+  }
+
+  const QString answer = payload.value(QStringLiteral("answer")).toString();
+  QString reason;
+  switch (manager->respondToPairing(id, acceptValue.toBool(), answer)) {
+    case PairingResponse::Answered:
+      return;  // bluetooth/pairing/closed follows when BlueZ has the answer
+    case PairingResponse::UnknownPrompt:
+      reason = QStringLiteral("unknown_prompt");
+      break;
+    case PairingResponse::InvalidAnswer:
+      reason = QStringLiteral("invalid_answer");
+      break;
+  }
+  broadcastEvent(QStringLiteral("bluetooth/pairing/rejected"),
+                 QVariantMap{{QStringLiteral("id"), id},
+                             {QStringLiteral("reason"), reason}});
 }
 
 void WebSocketServer::sendAudioStateTo(QWebSocket* client) const {

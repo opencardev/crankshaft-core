@@ -5,6 +5,7 @@ add_executable(crankshaft-core-tests
     test_audio_router.cpp
     test_audio_math.cpp
     test_audio_outputs.cpp
+    test_bluetooth_pairing_prompts.cpp
     test_aasdk_error_classification.cpp
     test_android_auto_transport_mode.cpp
     test_websocket_client_contract.cpp

@@ -120,6 +120,15 @@ class AudioRouter : public QObject {
   /** @brief The chosen output. Empty means the system default. */
   [[nodiscard]] auto outputDevice() const -> QString;
 
+  /**
+   * @brief Switch to a Bluetooth output when its speaker connects. On by default.
+   *
+   * Only a speaker that connects after startup is switched to. A speaker already
+   * connected at startup does not override the saved output.
+   */
+  auto setBluetoothAutoSelect(bool enabled) -> bool;
+  [[nodiscard]] auto bluetoothAutoSelect() const -> bool;
+
   /** @brief The output in use. Empty means the system default. */
   [[nodiscard]] auto activeOutput() const -> QString;
 
@@ -192,6 +201,9 @@ class AudioRouter : public QObject {
   // Written on the main thread only (startup, WebSocket commands and the poll timer).
   QList<AudioOutput> m_outputs;
   QString m_preferredOutput;
+  bool m_bluetoothAutoSelect = true;
+  // The first successful listing is the startup state, not a connection event.
+  bool m_outputsListed = false;
 
   // How often the output list is re-read, so Bluetooth and hot-plugged outputs appear.
   static constexpr int kOutputPollMs = 5000;

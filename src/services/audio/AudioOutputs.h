@@ -43,3 +43,12 @@ struct AudioOutput {
  * a JSON array, so a failed listing never looks like a list of devices.
  */
 QList<AudioOutput> parsePactlSinks(const QByteArray& json);
+
+/**
+ * @brief Bluetooth outputs in `found` that were not in `previous`.
+ *
+ * A Bluetooth sink appears when its speaker connects, so these are the speakers that
+ * connected since the last listing. Direct-attached outputs are never returned.
+ */
+QList<AudioOutput> newBluetoothOutputs(const QList<AudioOutput>& found,
+                                       const QList<AudioOutput>& previous);

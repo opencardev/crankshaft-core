@@ -73,6 +73,7 @@ constexpr auto kStateKeyMuted = "core.audio.muted";
 constexpr auto kStateKeyBalance = "core.audio.balance";
 constexpr auto kStateKeyDucking = "core.audio.ducking_enabled";
 constexpr auto kStateKeyOutput = "core.audio.output";
+constexpr auto kStateKeyBluetoothAutoSelect = "core.audio.bluetooth_auto_select";
 constexpr int kPersistDebounceMs = 500;
 
 QStringList runtimeDirCandidates() {
@@ -216,6 +217,8 @@ void AudioRouter::applyStoredState() {
       config.get(QString::fromLatin1(kStateKeyBalance), 0).toInt()));
   m_duckingEnabled.store(config.get(QString::fromLatin1(kStateKeyDucking), true).toBool());
   m_preferredOutput = config.get(QString::fromLatin1(kStateKeyOutput), QString()).toString();
+  m_bluetoothAutoSelect =
+      config.get(QString::fromLatin1(kStateKeyBluetoothAutoSelect), true).toBool();
 
   if (m_mediaPipeline) {
     AudioHAL* audioHal = m_mediaPipeline->audioHAL();
@@ -237,6 +240,7 @@ void AudioRouter::persistState() {
   config.set(QString::fromLatin1(kStateKeyBalance), m_balance.load());
   config.set(QString::fromLatin1(kStateKeyDucking), m_duckingEnabled.load());
   config.set(QString::fromLatin1(kStateKeyOutput), m_preferredOutput);
+  config.set(QString::fromLatin1(kStateKeyBluetoothAutoSelect), m_bluetoothAutoSelect);
 
   const QString path = config.loadedFilePath();
   if (!path.isEmpty() && !config.save(path)) {
@@ -411,6 +415,16 @@ bool AudioRouter::setOutputDevice(const QString& id) {
   return applied;
 }
 
+bool AudioRouter::setBluetoothAutoSelect(bool enabled) {
+  m_bluetoothAutoSelect = enabled;
+  schedulePersist();
+  return true;
+}
+
+bool AudioRouter::bluetoothAutoSelect() const {
+  return m_bluetoothAutoSelect;
+}
+
 QString AudioRouter::outputDevice() const {
   return m_preferredOutput;
 }
@@ -484,13 +498,29 @@ void AudioRouter::onSinkListFinished() {
   // A failed listing means no outputs are visible, so the sink falls back to the default.
   const QList<AudioOutput> found =
       listed ? parsePactlSinks(m_listProcess->readAllStandardOutput()) : QList<AudioOutput>();
+  // The first listing is the startup state. A speaker already connected then must not
+  // override the saved output, so only Bluetooth outputs that appear later count.
+  const bool startupListing = listed && !m_outputsListed;
+  if (listed) {
+    m_outputsListed = true;
+  }
   if (sameOutputs(found, m_outputs)) {
     return;
   }
 
+  const QList<AudioOutput> arrived =
+      startupListing ? QList<AudioOutput>() : newBluetoothOutputs(found, m_outputs);
   m_outputs = found;
   Logger::instance().info(QStringLiteral("[AudioRouter] Audio outputs changed: %1 found")
                               .arg(static_cast<qlonglong>(m_outputs.size())));
+  if (m_bluetoothAutoSelect && !arrived.isEmpty() &&
+      m_preferredOutput != arrived.first().id) {
+    Logger::instance().info(QStringLiteral("[AudioRouter] Bluetooth output connected, "
+                                          "selecting %1")
+                                .arg(arrived.first().id));
+    m_preferredOutput = arrived.first().id;
+    schedulePersist();
+  }
   reconcileOutput();
   emit outputsChanged();
 }
@@ -580,6 +610,7 @@ QVariantMap AudioRouter::stateSnapshot() const {
   }
   state[QStringLiteral("outputs")] = outputList;
   state[QStringLiteral("output")] = m_preferredOutput;
+  state[QStringLiteral("bluetooth_auto_select")] = m_bluetoothAutoSelect;
   state[QStringLiteral("active_output")] = activeOutput();
   return state;
 }

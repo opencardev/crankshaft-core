@@ -24,6 +24,26 @@
 #include <QJsonObject>
 #include <QJsonValue>
 
+#include <algorithm>
+
+QList<AudioOutput> newBluetoothOutputs(const QList<AudioOutput>& found,
+                                       const QList<AudioOutput>& previous) {
+  QList<AudioOutput> arrived;
+  for (const AudioOutput& output : found) {
+    if (!output.bluetooth) {
+      continue;
+    }
+    const bool wasListed = std::any_of(previous.cbegin(), previous.cend(),
+                                       [&output](const AudioOutput& old) {
+                                         return old.id == output.id;
+                                       });
+    if (!wasListed) {
+      arrived.append(output);
+    }
+  }
+  return arrived;
+}
+
 QList<AudioOutput> parsePactlSinks(const QByteArray& json) {
   QList<AudioOutput> outputs;
 

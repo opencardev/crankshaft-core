@@ -22,6 +22,7 @@
 #include <QDebug>
 
 #include "../wireless/BluetoothHAL.h"
+#include "../wireless/BluetoothPairingAgent.h"
 
 namespace {
 
@@ -92,7 +93,9 @@ class DbusBluetoothManagerBackend : public BluetoothManagerBackend {
 
  public:
   explicit DbusBluetoothManagerBackend(QObject* parent = nullptr)
-      : BluetoothManagerBackend(parent), m_hal(new BluetoothHAL(this)) {
+      : BluetoothManagerBackend(parent),
+        m_hal(new BluetoothHAL(this)),
+        m_agent(new BluetoothPairingAgent(this)) {
     connect(m_hal, &BluetoothHAL::stateChanged, this,
             [this](BluetoothHAL::State state) { emit this->stateChanged(mapState(state)); });
     connect(m_hal, &BluetoothHAL::enabledChanged, this, &BluetoothManagerBackend::enabledChanged);
@@ -117,7 +120,14 @@ class DbusBluetoothManagerBackend : public BluetoothManagerBackend {
     connect(m_hal, &BluetoothHAL::pairingFailed, this,
             [this](const QString& address, const QString& error) {
               emit errorOccurred(QString("Pairing failed for %1: %2").arg(address, error));
+              emit pairingFailed(address, error);
             });
+    connect(m_agent, &BluetoothPairingAgent::promptRequested, this,
+            &BluetoothManagerBackend::pairingPromptRequested);
+    connect(m_agent, &BluetoothPairingAgent::displayRequested, this,
+            &BluetoothManagerBackend::pairingDisplayRequested);
+    connect(m_agent, &BluetoothPairingAgent::promptClosed, this,
+            &BluetoothManagerBackend::pairingPromptClosed);
     connect(m_hal, &BluetoothHAL::connectionFailed, this,
             [this](const QString& address, const QString& error) {
               emit errorOccurred(QString("Connection failed for %1: %2").arg(address, error));
@@ -125,6 +135,8 @@ class DbusBluetoothManagerBackend : public BluetoothManagerBackend {
   }
 
   auto initialise() -> bool override {
+    // Registration is retried when BlueZ appears, so a missing BlueZ is not an error here.
+    m_agent->registerAgent();
     return true;
   }
 
@@ -228,8 +240,14 @@ class DbusBluetoothManagerBackend : public BluetoothManagerBackend {
     return disconnected;
   }
 
+  auto respondToPairing(const QString& id, bool accepted, const QString& answer)
+      -> PairingResponse override {
+    return m_agent->respond(id, accepted, answer);
+  }
+
  private:
   BluetoothHAL* m_hal;
+  BluetoothPairingAgent* m_agent;
 };
 
 }  // namespace
@@ -263,9 +281,22 @@ BluetoothManagerImpl::BluetoothManagerImpl(BluetoothManagerBackend* backend, QOb
        &BluetoothManager::audioDisconnected);
   QObject::connect(m_backend, &BluetoothManagerBackend::errorOccurred, this,
        &BluetoothManager::errorOccurred);
+  QObject::connect(m_backend, &BluetoothManagerBackend::pairingFailed, this,
+       &BluetoothManager::pairingFailed);
+  QObject::connect(m_backend, &BluetoothManagerBackend::pairingPromptRequested, this,
+       &BluetoothManager::pairingPromptRequested);
+  QObject::connect(m_backend, &BluetoothManagerBackend::pairingDisplayRequested, this,
+       &BluetoothManager::pairingDisplayRequested);
+  QObject::connect(m_backend, &BluetoothManagerBackend::pairingPromptClosed, this,
+       &BluetoothManager::pairingPromptClosed);
 }
 
 BluetoothManagerImpl::~BluetoothManagerImpl() = default;
+
+auto BluetoothManagerImpl::respondToPairing(const QString& id, bool accepted,
+                                            const QString& answer) -> PairingResponse {
+  return m_backend->respondToPairing(id, accepted, answer);
+}
 
 auto BluetoothManagerImpl::initialise() -> bool {
   return m_backend->initialise();

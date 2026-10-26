@@ -51,6 +51,8 @@ class BluetoothManagerBackend : public QObject {
       -> bool = 0;
   virtual auto disconnectAudio(const QString& address, BluetoothManager::AudioProfile profile)
       -> bool = 0;
+  virtual auto respondToPairing(const QString& id, bool accepted, const QString& answer)
+      -> PairingResponse = 0;
 
  signals:
   void stateChanged(BluetoothManager::ConnectionState state);
@@ -64,6 +66,10 @@ class BluetoothManagerBackend : public QObject {
   void audioConnected(const QString& address, BluetoothManager::AudioProfile profile);
   void audioDisconnected(const QString& address, BluetoothManager::AudioProfile profile);
   void errorOccurred(const QString& error);
+  void pairingFailed(const QString& address, const QString& error);
+  void pairingPromptRequested(const PairingPrompt& prompt);
+  void pairingDisplayRequested(const QString& address, const QString& code);
+  void pairingPromptClosed(const QString& id);
 };
 
 class BluetoothManagerImpl : public BluetoothManager {
@@ -93,6 +99,8 @@ class BluetoothManagerImpl : public BluetoothManager {
   auto getConnectedDevices() const -> QVector<BluetoothDevice> override;
   auto connectAudio(const QString& address, AudioProfile profile) -> bool override;
   auto disconnectAudio(const QString& address, AudioProfile profile) -> bool override;
+  auto respondToPairing(const QString& id, bool accepted, const QString& answer)
+      -> PairingResponse override;
 
  private:
   BluetoothManagerBackend* m_backend;

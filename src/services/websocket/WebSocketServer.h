@@ -21,6 +21,7 @@
 
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -336,6 +337,13 @@ class WebSocketServer : public QObject {
   void handleAudioPublish(const QString& topic, const QVariantMap& payload);
   /// Send the current audio state to one client (used on subscribe to audio/state)
   void sendAudioStateTo(QWebSocket* client) const;
+  /// Forward pairing events from the Bluetooth manager to clients (connected once per manager)
+  void connectBluetoothPairingSignals(BluetoothManager* manager);
+  /// Handle bluetooth/pairing/respond: the user's answer to a pairing prompt
+  void handlePairingResponse(BluetoothManager* manager, const QVariantMap& payload);
+  /// Broadcast the outcome of a pairing: the name is shown, or the error when it failed
+  void broadcastPairResult(const QString& address, const QString& name, bool success,
+                           const QString& error);
   /// Handle localhost-only admin API requests from provisioning UI
   void handleAdminApiRequest(QWebSocket* client, const QJsonObject& request);
   /// Route service command to appropriate service handler
@@ -384,6 +392,9 @@ class WebSocketServer : public QObject {
   qint64 m_lastVideoFrameBroadcastMs{0};
   QTimer m_scanTimeoutTimer;
   BluetoothManager* m_cachedBluetoothManager{nullptr};
+  BluetoothManager* m_pairingSignalsManager{nullptr};
+  // Device names for pairings in progress, by address, so results can show the name.
+  QHash<QString, QString> m_pendingPairNames;
   int m_videoFrameIntervalMs{66};
   quint64 m_videoFrameSequence{0};
   quint64 m_h264BroadcastCount{0};

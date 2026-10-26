@@ -86,3 +86,40 @@ TEST(AudioOutputsTest, MalformedOrNonArrayInputGivesNoOutputs) {
   EXPECT_TRUE(parsePactlSinks("not json").isEmpty());
   EXPECT_TRUE(parsePactlSinks(R"({"name": "single object, not an array"})").isEmpty());
 }
+
+TEST(AudioOutputsTest, NewBluetoothSinkIsReportedAsArrived) {
+  const QList<AudioOutput> previous = {
+      AudioOutput{QStringLiteral("alsa_output.hdmi"), QStringLiteral("HDMI"), false}};
+  const QList<AudioOutput> found = {
+      AudioOutput{QStringLiteral("alsa_output.hdmi"), QStringLiteral("HDMI"), false},
+      AudioOutput{QStringLiteral("bluez_output.AA_BB_CC_DD_EE_FF.1"), QStringLiteral("Car Speaker"),
+                  true}};
+
+  const QList<AudioOutput> arrived = newBluetoothOutputs(found, previous);
+
+  ASSERT_EQ(arrived.size(), 1);
+  EXPECT_EQ(arrived[0].id, QStringLiteral("bluez_output.AA_BB_CC_DD_EE_FF.1"));
+}
+
+TEST(AudioOutputsTest, BluetoothSinkAlreadyListedIsNotReportedAgain) {
+  const QList<AudioOutput> outputs = {
+      AudioOutput{QStringLiteral("bluez_output.AA_BB_CC_DD_EE_FF.1"), QStringLiteral("Car Speaker"),
+                  true}};
+
+  EXPECT_TRUE(newBluetoothOutputs(outputs, outputs).isEmpty());
+}
+
+TEST(AudioOutputsTest, NewDirectOutputIsNotReportedAsBluetooth) {
+  const QList<AudioOutput> found = {
+      AudioOutput{QStringLiteral("alsa_output.usb_dac"), QStringLiteral("USB DAC"), false}};
+
+  EXPECT_TRUE(newBluetoothOutputs(found, {}).isEmpty());
+}
+
+TEST(AudioOutputsTest, DisconnectedBluetoothSinkIsNotReported) {
+  const QList<AudioOutput> previous = {
+      AudioOutput{QStringLiteral("bluez_output.AA_BB_CC_DD_EE_FF.1"), QStringLiteral("Car Speaker"),
+                  true}};
+
+  EXPECT_TRUE(newBluetoothOutputs({}, previous).isEmpty());
+}
