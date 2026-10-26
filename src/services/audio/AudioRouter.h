@@ -180,6 +180,7 @@ class AudioRouter : public QObject {
  private slots:
   void onSinkListFinished();
 
+ private:
   MediaPipeline* m_mediaPipeline = nullptr;
   QTimer* m_saveTimer = nullptr;
   QTimer* m_outputPollTimer = nullptr;
