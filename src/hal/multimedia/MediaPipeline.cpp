@@ -62,8 +62,9 @@ bool MediaPipeline::start(const MediaConfig& config) {
     m_audioHAL->setRoute(config.audioRoute);
 
     if (!m_audioHAL->startStream(config.streamName, config.audioSampleRate, config.audioChannels)) {
-      qCritical() << "Failed to start audio stream";
-      return false;
+      // Keep video and the Android Auto session running without audio, rather than failing the pipeline.
+      qCritical() << "Failed to start audio stream; continuing without audio";
+      m_config.enableAudio = false;
     }
   }
 
@@ -121,12 +122,12 @@ VideoHAL* MediaPipeline::videoHAL() const {
   return m_videoHAL;
 }
 
-bool MediaPipeline::pushAudioData(const QByteArray& data) {
+bool MediaPipeline::pushAudioData(const QString& source, const QByteArray& data) {
   if (!m_isActive || !m_config.enableAudio) {
     return false;
   }
 
-  return m_audioHAL->pushAudioData(data);
+  return m_audioHAL->pushAudioData(source, data);
 }
 
 bool MediaPipeline::pushVideoFrame(const QByteArray& frameData) {

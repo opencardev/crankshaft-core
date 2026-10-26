@@ -21,19 +21,54 @@
 
 #include <unistd.h>
 
+#include <algorithm>
+
 #include <QAudioDevice>
 #include <QDateTime>
-#include <QDebug>
 #include <QFileInfo>
 #include <QMediaDevices>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStringList>
+#include <QTimer>
 
 #include "../../hal/multimedia/MediaPipeline.h"
+#include "../config/ConfigService.h"
 #include "../logging/Logger.h"
+#include "AudioMath.h"
 
 namespace {
+
+// Source formats are the Android Auto channel layouts. They must match the
+// AASDK audio channel configuration; verify on hardware when that changes.
+struct SourceFormat {
+  const char* name;
+  int sampleRate;
+  int channels;
+};
+
+constexpr SourceFormat kMediaFormat{"media", 48000, 2};
+constexpr SourceFormat kGuidanceFormat{"guidance", 16000, 1};
+constexpr SourceFormat kSystemFormat{"system", 16000, 1};
+
+const SourceFormat* formatForRole(AAudioStreamRole role) {
+  switch (role) {
+    case AAudioStreamRole::MEDIA:
+      return &kMediaFormat;
+    case AAudioStreamRole::GUIDANCE:
+      return &kGuidanceFormat;
+    case AAudioStreamRole::SYSTEM_AUDIO:
+      return &kSystemFormat;
+    default:
+      return nullptr;
+  }
+}
+
+constexpr auto kStateKeyVolume = "core.audio.volume";
+constexpr auto kStateKeyMuted = "core.audio.muted";
+constexpr auto kStateKeyBalance = "core.audio.balance";
+constexpr auto kStateKeyDucking = "core.audio.ducking_enabled";
+constexpr int kPersistDebounceMs = 500;
 
 QStringList runtimeDirCandidates() {
   QStringList candidates;
@@ -65,11 +100,17 @@ AudioRouter::AudioRouter(MediaPipeline* mediaPipeline, QObject* parent)
     return;
   }
 
-  // Note: QMediaDevices is a static class, not a singleton instance
-  // Connect to audio device changes via qt_audio_engine signal
+  m_saveTimer = new QTimer(this);
+  m_saveTimer->setSingleShot(true);
+  m_saveTimer->setInterval(kPersistDebounceMs);
+  connect(m_saveTimer, &QTimer::timeout, this, &AudioRouter::persistState);
 }
 
 AudioRouter::~AudioRouter() {
+  if (m_saveTimer && m_saveTimer->isActive()) {
+    m_saveTimer->stop();
+    persistState();
+  }
   shutdown();
 }
 
@@ -77,73 +118,86 @@ bool AudioRouter::initialize() {
   if (m_initialized) {
     return true;
   }
-
-  m_lastInitializeAttemptMs = QDateTime::currentMSecsSinceEpoch();
+  if (!m_mediaPipeline) {
+    return false;
+  }
 
   Logger::instance().info(QStringLiteral("[AudioRouter] Initialising audio router"));
   m_pipewireAvailable = false;
   m_pulseaudioAvailable = false;
 
-  // Try PipeWire first (modern, preferred backend)
+  // Backend detection is a one-off startup probe. It is reported to clients but
+  // does not gate routing, because the pipeline sink decides what is actually played.
   if (initializePipeWire()) {
     m_pipewireAvailable = true;
     Logger::instance().info(QStringLiteral("[AudioRouter] PipeWire backend initialised"));
-  }
-  // Fallback to PulseAudio
-  else if (initializePulseAudio()) {
+  } else if (initializePulseAudio()) {
     m_pulseaudioAvailable = true;
     Logger::instance().info(QStringLiteral("[AudioRouter] PulseAudio backend initialised"));
   } else {
     Logger::instance().warning(QStringLiteral("[AudioRouter] No audio backend available"));
   }
 
-  // Enumerate available devices
   const auto& devices = QMediaDevices::audioOutputs();
-  Logger::instance().info(
-      QString::asprintf("[AudioRouter] Found %lld audio output devices",
-              static_cast<long long>(devices.size())));
-
+  Logger::instance().info(QStringLiteral("[AudioRouter] Found %1 audio output devices")
+                              .arg(static_cast<qlonglong>(devices.size())));
   for (const auto& device : devices) {
     Logger::instance().debug(QStringLiteral("[AudioRouter] Device: %1 (%2 channels)")
                                  .arg(device.description())
                                  .arg(device.maximumChannelCount()));
   }
 
+  createMixerSources();
+  applyStoredState();
+
   m_initialized = m_pipewireAvailable || m_pulseaudioAvailable;
   return m_initialized;
 }
 
-bool AudioRouter::shouldRetryInitialization() const {
-  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-  return (nowMs - m_lastInitializeAttemptMs) >= kInitializeRetryIntervalMs;
-}
-
-bool AudioRouter::ensureAudioBackendReady(const char* callerTag) {
-  if (m_initialized) {
-    return true;
-  }
-
-  if (m_lastInitializeAttemptMs == 0 || shouldRetryInitialization()) {
-    Logger::instance().info(
-        QStringLiteral("[AudioRouter] Retrying backend initialization (%1)")
-            .arg(QString::fromUtf8(callerTag)));
-    if (initialize()) {
-      Logger::instance().info(
-          QStringLiteral("[AudioRouter] Backend recovered (%1)")
-              .arg(QString::fromUtf8(callerTag)));
-      return true;
+void AudioRouter::createMixerSources() {
+  AudioHAL* audioHal = m_mediaPipeline->audioHAL();
+  for (const SourceFormat& format : {kMediaFormat, kGuidanceFormat, kSystemFormat}) {
+    if (!audioHal->addSource(QString::fromLatin1(format.name), format.sampleRate)) {
+      Logger::instance().error(QStringLiteral("[AudioRouter] Failed to create mixer source %1")
+                                   .arg(QString::fromLatin1(format.name)));
     }
   }
+}
 
-  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-  if ((nowMs - m_lastInitializeFailureLogMs) >= kInitializeFailureLogIntervalMs) {
-    Logger::instance().warning(
-        QStringLiteral("[AudioRouter] Backend unavailable; still waiting (%1)")
-            .arg(QString::fromUtf8(callerTag)));
-    m_lastInitializeFailureLogMs = nowMs;
+void AudioRouter::applyStoredState() {
+  const auto& config = ConfigService::instance();
+  m_volume.store(audio_math::clampPercent(
+      config.get(QString::fromLatin1(kStateKeyVolume), kDefaultVolume).toInt()));
+  m_muted.store(config.get(QString::fromLatin1(kStateKeyMuted), false).toBool());
+  m_balance.store(audio_math::clampBalance(
+      config.get(QString::fromLatin1(kStateKeyBalance), 0).toInt()));
+  m_duckingEnabled.store(config.get(QString::fromLatin1(kStateKeyDucking), true).toBool());
+
+  if (m_mediaPipeline) {
+    AudioHAL* audioHal = m_mediaPipeline->audioHAL();
+    audioHal->setVolume(m_volume.load());
+    audioHal->setMute(m_muted.load());
   }
+}
 
-  return false;
+void AudioRouter::schedulePersist() {
+  if (m_saveTimer) {
+    m_saveTimer->start();
+  }
+}
+
+void AudioRouter::persistState() {
+  auto& config = ConfigService::instance();
+  config.set(QString::fromLatin1(kStateKeyVolume), m_volume.load());
+  config.set(QString::fromLatin1(kStateKeyMuted), m_muted.load());
+  config.set(QString::fromLatin1(kStateKeyBalance), m_balance.load());
+  config.set(QString::fromLatin1(kStateKeyDucking), m_duckingEnabled.load());
+
+  const QString path = config.loadedFilePath();
+  if (!path.isEmpty() && !config.save(path)) {
+    Logger::instance().warning(QStringLiteral("[AudioRouter] Failed to persist audio state to %1")
+                                   .arg(path));
+  }
 }
 
 bool AudioRouter::initializePipeWire() {
@@ -243,8 +297,9 @@ bool AudioRouter::routeAudioFrame(AAudioStreamRole role, const QByteArray& audio
     return false;
   }
 
-  if (!ensureAudioBackendReady("route")) {
-    Logger::instance().warning(QStringLiteral("[AudioRouter] Audio router not initialised"));
+  const SourceFormat* format = formatForRole(role);
+  if (!format) {
+    Logger::instance().warning(QStringLiteral("[AudioRouter] Unknown audio stream role"));
     return false;
   }
 
@@ -253,22 +308,41 @@ bool AudioRouter::routeAudioFrame(AAudioStreamRole role, const QByteArray& audio
     return false;
   }
 
-  // Apply ducking if enabled and role is not guidance
-  QByteArray processedData = audioData;
-  if (m_duckingEnabled && role != AAudioStreamRole::GUIDANCE) {
-    // Reduce audio level by applying amplitude scaling
-    // duckingLevel is 0-100, apply as volume multiplier
-    float volumeFactor = static_cast<float>(m_duckingLevel) / 100.0F;
-    int16_t* samples = reinterpret_cast<int16_t*>(processedData.data());
-    size_t numSamples = processedData.size() / sizeof(int16_t);
-
-    for (size_t i = 0; i < numSamples; ++i) {
-      samples[i] = static_cast<int16_t>(static_cast<float>(samples[i]) * volumeFactor);
-    }
+  const int bytesPerInputFrame = static_cast<int>(audio_math::kBytesPerSample) * format->channels;
+  if (audioData.size() % bytesPerInputFrame != 0) {
+    Logger::instance().warning(
+        QStringLiteral("[AudioRouter] Frame of %1 bytes is not a whole number of %2-byte frames")
+            .arg(audioData.size())
+            .arg(bytesPerInputFrame));
+    return false;
   }
 
-  // Route through MediaPipeline audio HAL
-  if (!m_mediaPipeline->pushAudioData(processedData)) {
+  // Guidance holds ducking open for a short time after its last frame, so the
+  // media level does not jump back up between prompt fragments.
+  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+  if (role == AAudioStreamRole::GUIDANCE) {
+    m_guidanceActiveUntilMs.store(nowMs + kGuidanceHoldMs);
+  }
+  const bool guidanceActive = nowMs < m_guidanceActiveUntilMs.load();
+  const bool duckThisStream =
+      role != AAudioStreamRole::GUIDANCE && m_duckingEnabled.load() && guidanceActive;
+  const double duck = audio_math::duckingGain(duckThisStream, kDefaultDuckPercent);
+
+  // Balance and ducking are both linear, so applying them per source before
+  // mixing gives the same result as applying them to the mixed output.
+  const audio_math::ChannelGains balance = audio_math::balanceGains(m_balance.load());
+  const audio_math::ChannelGains gains{balance.left * duck, balance.right * duck};
+
+  QByteArray stereo;
+  if (format->channels == 1) {
+    stereo.resize(audioData.size() * 2);
+    audio_math::upmixMonoToStereo(audioData.constData(), audioData.size(), stereo.data());
+  } else {
+    stereo = audioData;
+  }
+  audio_math::applyStereoGains(stereo.data(), stereo.size(), gains);
+
+  if (!m_mediaPipeline->pushAudioData(QString::fromLatin1(format->name), stereo)) {
     Logger::instance().error(QStringLiteral("[AudioRouter] Failed to push audio data to pipeline"));
     return false;
   }
@@ -277,134 +351,124 @@ bool AudioRouter::routeAudioFrame(AAudioStreamRole role, const QByteArray& audio
 }
 
 bool AudioRouter::setAudioDevice(AAudioStreamRole role, const QString& deviceId) {
-  if (!ensureAudioBackendReady("set-device")) {
-    Logger::instance().warning(QStringLiteral("[AudioRouter] Audio router not initialised"));
+  if (role != AAudioStreamRole::MEDIA) {
+    Logger::instance().warning(
+        QStringLiteral("[AudioRouter] Only the media role has a selectable output device"));
     return false;
   }
 
+  const auto& devices = QMediaDevices::audioOutputs();
   QAudioDevice device;
 
   if (deviceId.isEmpty()) {
-    // Use default device for role
-    device = selectAudioDevice(role);
+    device = QMediaDevices::defaultAudioOutput();
   } else {
-    // Find device by ID
-    const auto& devices = QMediaDevices::audioOutputs();
-    auto it = std::find_if(devices.begin(), devices.end(), [&deviceId](const QAudioDevice& dev) {
-      return dev.id() == deviceId.toLatin1();
+    // Qt device ids are backend sink names. A Bluetooth MAC address appears in
+    // the BlueZ sink name with ':' replaced by '_', so match on that form too.
+    const QString macAsSinkFragment = QString(deviceId).replace(QLatin1Char(':'), QLatin1Char('_'));
+    const auto match = std::find_if(devices.begin(), devices.end(), [&](const QAudioDevice& dev) {
+      const QString id = QString::fromUtf8(dev.id());
+      return id == deviceId || id.contains(macAsSinkFragment, Qt::CaseInsensitive);
     });
 
-    if (it == devices.end()) {
+    if (match == devices.end()) {
       Logger::instance().error(
           QStringLiteral("[AudioRouter] Audio device not found: %1").arg(deviceId));
       return false;
     }
-
-    device = *it;
+    device = *match;
   }
 
-  // Update appropriate config
-  switch (role) {
-    case AAudioStreamRole::MEDIA:
-      m_mediaConfig.device = device;
-      break;
-    case AAudioStreamRole::GUIDANCE:
-      m_guidanceConfig.device = device;
-      break;
-    case AAudioStreamRole::SYSTEM_AUDIO:
-      m_systemConfig.device = device;
-      break;
-    default:
-      Logger::instance().warning(QStringLiteral("[AudioRouter] Unknown audio stream role"));
-      return false;
-  }
-
-  Logger::instance().info(QStringLiteral("[AudioRouter] Set audio device for role %1: %2")
-                              .arg(static_cast<int>(role))
+  m_preferredDevice = device;
+  Logger::instance().info(QStringLiteral("[AudioRouter] Preferred output device: %1 "
+                                         "(pipeline sink follows system default)")
                               .arg(device.description()));
-
   return true;
 }
 
 QStringList AudioRouter::getAvailableAudioDevices() const {
   QStringList devices;
-  const auto& audioOutputs = QMediaDevices::audioOutputs();
-
-  for (const auto& output : audioOutputs) {
+  for (const auto& output : QMediaDevices::audioOutputs()) {
     devices.append(output.description());
   }
-
   return devices;
 }
 
-bool AudioRouter::setStreamVolume(AAudioStreamRole role, int volume) {
-  if (volume < 0 || volume > 100) {
-    Logger::instance().warning(
-        QStringLiteral("[AudioRouter] Invalid volume level: %1").arg(volume));
+bool AudioRouter::setVolume(int percent) {
+  if (percent < audio_math::kMinPercent || percent > audio_math::kMaxPercent) {
+    Logger::instance().warning(QStringLiteral("[AudioRouter] Invalid volume level: %1").arg(percent));
     return false;
   }
 
-  switch (role) {
-    case AAudioStreamRole::MEDIA:
-      m_mediaConfig.volumeLevel = volume;
-      break;
-    case AAudioStreamRole::GUIDANCE:
-      m_guidanceConfig.volumeLevel = volume;
-      break;
-    case AAudioStreamRole::SYSTEM_AUDIO:
-      m_systemConfig.volumeLevel = volume;
-      break;
-    default:
-      Logger::instance().warning(QStringLiteral("[AudioRouter] Unknown audio stream role"));
-      return false;
-  }
-
-  // Update MediaPipeline if configured for this role
+  m_volume.store(percent);
   if (m_mediaPipeline) {
-    m_mediaPipeline->audioHAL()->setVolume(volume);
+    m_mediaPipeline->audioHAL()->setVolume(percent);
   }
-
-  Logger::instance().debug(QStringLiteral("[AudioRouter] Set volume for role %1: %2%")
-                               .arg(static_cast<int>(role))
-                               .arg(volume));
-
-  emit volumeChanged(role, volume);
+  schedulePersist();
   return true;
 }
 
-bool AudioRouter::setStreamMuted(AAudioStreamRole role, bool muted) {
-  switch (role) {
-    case AAudioStreamRole::MEDIA:
-      m_mediaConfig.muted = muted;
-      break;
-    case AAudioStreamRole::GUIDANCE:
-      m_guidanceConfig.muted = muted;
-      break;
-    case AAudioStreamRole::SYSTEM_AUDIO:
-      m_systemConfig.muted = muted;
-      break;
-    default:
-      Logger::instance().warning(QStringLiteral("[AudioRouter] Unknown audio stream role"));
-      return false;
-  }
+int AudioRouter::volume() const {
+  return m_volume.load();
+}
 
+bool AudioRouter::setMuted(bool muted) {
+  m_muted.store(muted);
   if (m_mediaPipeline) {
     m_mediaPipeline->audioHAL()->setMute(muted);
   }
-
-  Logger::instance().debug(QStringLiteral("[AudioRouter] %1 audio for role %2")
-                               .arg(muted ? QStringLiteral("Muted") : QStringLiteral("Unmuted"))
-                               .arg(static_cast<int>(role)));
-
+  schedulePersist();
   return true;
 }
 
-bool AudioRouter::enableAudioDucking(bool enable) {
-  m_duckingEnabled = enable;
-  Logger::instance().info(
-      QStringLiteral("[AudioRouter] Audio ducking %1")
-          .arg(enable ? QStringLiteral("enabled") : QStringLiteral("disabled")));
+bool AudioRouter::isMuted() const {
+  return m_muted.load();
+}
+
+bool AudioRouter::setBalance(int balance) {
+  if (balance < audio_math::kMinBalance || balance > audio_math::kMaxBalance) {
+    Logger::instance().warning(QStringLiteral("[AudioRouter] Invalid balance: %1").arg(balance));
+    return false;
+  }
+
+  m_balance.store(balance);
+  schedulePersist();
   return true;
+}
+
+int AudioRouter::balance() const {
+  return m_balance.load();
+}
+
+bool AudioRouter::enableAudioDucking(bool enable) {
+  m_duckingEnabled.store(enable);
+  Logger::instance().info(QStringLiteral("[AudioRouter] Audio ducking %1")
+                              .arg(enable ? QStringLiteral("enabled") : QStringLiteral("disabled")));
+  schedulePersist();
+  return true;
+}
+
+bool AudioRouter::isAudioDuckingEnabled() const {
+  return m_duckingEnabled.load();
+}
+
+QVariantMap AudioRouter::stateSnapshot() const {
+  QString backend = QStringLiteral("None");
+  if (m_pipewireAvailable) {
+    backend = QStringLiteral("PipeWire");
+  } else if (m_pulseaudioAvailable) {
+    backend = QStringLiteral("PulseAudio");
+  }
+
+  QVariantMap state;
+  state[QStringLiteral("available")] = true;
+  state[QStringLiteral("backend")] = backend;
+  state[QStringLiteral("backend_available")] = m_initialized;
+  state[QStringLiteral("volume")] = m_volume.load();
+  state[QStringLiteral("muted")] = m_muted.load();
+  state[QStringLiteral("balance")] = m_balance.load();
+  state[QStringLiteral("ducking_enabled")] = m_duckingEnabled.load();
+  return state;
 }
 
 bool AudioRouter::shutdown() {
@@ -414,7 +478,6 @@ bool AudioRouter::shutdown() {
 
   Logger::instance().info(QStringLiteral("[AudioRouter] Shutting down audio router"));
 
-  // Stop media pipeline if active
   if (m_mediaPipeline && m_mediaPipeline->isActive()) {
     m_mediaPipeline->stop();
   }
@@ -423,54 +486,4 @@ bool AudioRouter::shutdown() {
   m_pipewireAvailable = false;
   m_pulseaudioAvailable = false;
   return true;
-}
-
-QAudioDevice AudioRouter::selectAudioDevice(AAudioStreamRole role) const {
-  const auto& devices = QMediaDevices::audioOutputs();
-
-  if (devices.isEmpty()) {
-    Logger::instance().warning(QStringLiteral("[AudioRouter] No audio devices available"));
-    return QAudioDevice();
-  }
-
-  // For guidance, prefer primary output device
-  if (role == AAudioStreamRole::GUIDANCE) {
-    return devices.first();
-  }
-
-  // For media and system, try to find headphone or Bluetooth device
-  for (const auto& device : devices) {
-    const auto& desc = device.description();
-    if (desc.contains(QStringLiteral("Headphone"), Qt::CaseInsensitive) ||
-        desc.contains(QStringLiteral("Bluetooth"), Qt::CaseInsensitive)) {
-      return device;
-    }
-  }
-
-  // Fallback to first device
-  return devices.first();
-}
-
-void AudioRouter::onAudioDevicesChanged() {
-  Logger::instance().info(QStringLiteral("[AudioRouter] Audio devices changed"));
-  emit audioDevicesChanged();
-}
-
-void AudioRouter::onPipelineStateChanged(bool isActive) {
-  if (isActive) {
-    Logger::instance().debug(QStringLiteral("[AudioRouter] Media pipeline started"));
-  } else {
-    Logger::instance().debug(QStringLiteral("[AudioRouter] Media pipeline stopped"));
-  }
-}
-
-AAudioStreamRole AudioRouter::streamTypeToRole(int streamType) {
-  switch (streamType) {
-    case 1:  // AUDIO_STREAM_GUIDANCE
-      return AAudioStreamRole::GUIDANCE;
-    case 2:  // AUDIO_STREAM_SYSTEM_AUDIO
-      return AAudioStreamRole::SYSTEM_AUDIO;
-    default:
-      return AAudioStreamRole::MEDIA;
-  }
 }

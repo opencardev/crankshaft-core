@@ -240,6 +240,10 @@ bool ServiceManager::isServiceRunning(const QString& deviceName) const {
   return false;
 }
 
+AudioRouter* ServiceManager::getAudioRouter() const {
+  return m_androidAutoService ? m_androidAutoService->audioRouter() : nullptr;
+}
+
 QStringList ServiceManager::getRunningServices() const {
   QStringList running;
   if (m_androidAutoService) running.append("AndroidAuto");
@@ -281,6 +285,8 @@ bool ServiceManager::startAndroidAutoService(const DeviceConfig& device) {
     Logger::instance().info("[ServiceManager]      Creating MediaPipeline for Real AndroidAuto");
     m_mediaPipeline = new MediaPipeline(this);
     MediaConfig config{};  // Use defaults until profiles provide detailed config
+    // AudioRouter pushes Android Auto audio into this pipeline; with audio disabled every frame is dropped.
+    config.enableAudio = true;
     if (!m_mediaPipeline->start(config)) {
       Logger::instance().error("[ServiceManager]      Failed to start MediaPipeline");
       delete m_mediaPipeline;

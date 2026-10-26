@@ -50,7 +50,19 @@ class AudioHAL : public QObject {
 
   auto startStream(const QString& streamName, int sampleRate, int channels) -> bool;
   auto stopStream(const QString& streamName) -> bool;
-  auto pushAudioData(const QByteArray& data) -> bool;
+
+  /**
+   * @brief Register a named input to the mixer.
+   *
+   * Inputs are stereo S16LE at @p sampleRate and are converted to the mixer
+   * rate. Safe to call while the pipeline is playing.
+   */
+  auto addSource(const QString& name, int sampleRate) -> bool;
+
+  /**
+   * @brief Push interleaved stereo S16LE PCM into a registered source.
+   */
+  auto pushAudioData(const QString& source, const QByteArray& data) -> bool;
 
   QStringList getAvailableDevices() const;
 

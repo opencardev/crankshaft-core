@@ -148,6 +148,9 @@ class RealAndroidAutoService : public AndroidAutoService {
   void configureTransport(const QMap<QString, QVariant>& settings) override;
   void setWirelessNetworkManager(
       const std::shared_ptr<IWirelessNetworkManager>& manager) override;
+  AudioRouter* audioRouter() const override {
+    return m_audioRouter;
+  }
   void setEventBus(EventBus* eventBus) {
     m_eventBus = eventBus;
   }

@@ -89,7 +89,7 @@ class MediaPipeline : public QObject {
   /**
    * @brief Push audio data to pipeline
    */
-  auto pushAudioData(const QByteArray& data) -> bool;
+  auto pushAudioData(const QString& source, const QByteArray& data) -> bool;
 
   /**
    * @brief Push video frame to pipeline

@@ -21,19 +21,17 @@
 
 #include <QAudioDevice>
 #include <QByteArray>
-#include <QMediaDevices>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVariantMap>
-#include <memory>
+#include <atomic>
 
 class MediaPipeline;
-class Logger;
+class QTimer;
 
 /**
  * @brief Audio stream roles for Android Auto
- *
- * Maps AASDK audio channels to vehicle audio zones
  */
 enum class AAudioStreamRole {
   MEDIA,         ///< Media/music playback
@@ -44,167 +42,109 @@ enum class AAudioStreamRole {
 };
 
 /**
- * @brief Audio Router for Android Auto media channels
+ * @brief Core-owned audio output for Android Auto channels and user controls.
  *
- * Handles routing of decoded PCM audio from AASDK audio channels
- * to vehicle audio outputs via PipeWire/PulseAudio stack.
+ * Core is the only process that plays audio. Each Android Auto channel is pushed
+ * into its own source in the media pipeline; the pipeline mixes the sources and
+ * applies the master volume, mute and output sink. This router applies the
+ * per-channel policy (ducking under guidance, balance) before pushing samples.
  *
- * Audio Stream Types (from AASDK):
- * - AUDIO_STREAM_GUIDANCE (1): Navigation turn-by-turn directions
- * - AUDIO_STREAM_SYSTEM_AUDIO (2): System sounds, notifications
- * - Media playback (implied): Music, podcasts, other media
+ * User controls (master volume, mute, balance, ducking) are owned here and
+ * exposed to clients over the WebSocket `audio/` topics. The state is persisted
+ * to the core configuration file when one is loaded.
  *
- * Routing Strategy:
- * 1. PipeWire (primary): Handles stream priority, device routing, ducking
- * 2. PulseAudio (fallback): Legacy compatibility for older systems
- * 3. ALSA (fallback): Direct hardware access if no daemon available
- *
- * The router integrates with MediaPipeline to provide seamless audio
- * processing through the existing audio HAL.
+ * Backend detection (PipeWire, then PulseAudio) runs once in initialize() and is
+ * reported in stateSnapshot(). It does not gate frame routing: the pipeline sink
+ * is the source of truth for whether audio is actually played.
  */
 class AudioRouter : public QObject {
   Q_OBJECT
 
  public:
+  static constexpr int kDefaultVolume = 50;
+  static constexpr int kDefaultDuckPercent = 40;
+
   explicit AudioRouter(MediaPipeline* mediaPipeline, QObject* parent = nullptr);
   ~AudioRouter() override;
 
   /**
-   * @brief Initialize audio router with PipeWire/PulseAudio
+   * @brief Detect the audio backend, create the mixer sources and load saved state.
    */
   auto initialize() -> bool;
 
   /**
-   * @brief Route audio data from AA channel to vehicle output
+   * @brief Route one PCM frame from an Android Auto channel into the mixer.
    *
-   * @param role Audio stream role (media, guidance, system)
-   * @param audioData PCM audio frames to route
-   * @return true if audio successfully routed, false on error
-   *
-   * Audio data format from AASDK:
-   * - Sample rate: 48 kHz (configurable, typically 16-48 kHz)
-   * - Channels: Stereo (2) or Mono (1)
-   * - Format: PCM 16-bit signed
-   * - Endianness: Native (typically little-endian on ARM)
+   * Input is S16LE, mono or stereo, at the sample rate configured for the role.
+   * Ducking and balance are applied here; the pipeline applies master volume.
    */
   auto routeAudioFrame(AAudioStreamRole role, const QByteArray& audioData) -> bool;
 
   /**
-   * @brief Set target audio device for given stream role
+   * @brief Record the preferred output device.
    *
-   * @param role Audio stream role
-   * @param deviceId Device ID to route to (empty = default)
-   * @return true if device set successfully
+   * Output selection currently follows the system default sink, so the device is
+   * validated and stored but not yet pinned in the pipeline.
    */
   auto setAudioDevice(AAudioStreamRole role, const QString& deviceId) -> bool;
 
   /**
    * @brief Get list of available audio output devices
    */
-  QStringList getAvailableAudioDevices() const;
+  [[nodiscard]] auto getAvailableAudioDevices() const -> QStringList;
 
-  /**
-   * @brief Configure volume levels per audio stream
-   *
-   * @param role Audio stream role
-   * @param volume Volume level (0-100)
-   * @return true if volume set successfully
-   */
-  auto setStreamVolume(AAudioStreamRole role, int volume) -> bool;
+  /** @brief Master volume, 0-100. */
+  auto setVolume(int percent) -> bool;
+  [[nodiscard]] auto volume() const -> int;
 
-  /**
-   * @brief Mute/unmute specific audio stream
-   */
-  auto setStreamMuted(AAudioStreamRole role, bool muted) -> bool;
+  /** @brief Master mute. */
+  auto setMuted(bool muted) -> bool;
+  [[nodiscard]] auto isMuted() const -> bool;
 
-  /**
-   * @brief Enable audio ducking for non-critical streams
-   *
-   * When guidance audio is active, automatically reduce volume
-   * of media and system sounds to improve comprehension
-   */
+  /** @brief Balance, -100 (left) to +100 (right). */
+  auto setBalance(int balance) -> bool;
+  [[nodiscard]] auto balance() const -> int;
+
+  /** @brief Reduce media and system audio while guidance is active. */
   auto enableAudioDucking(bool enable) -> bool;
+  [[nodiscard]] auto isAudioDuckingEnabled() const -> bool;
 
   /**
-   * @brief Shutdown audio routing and cleanup resources
+   * @brief Snapshot of user-visible audio state for clients.
+   */
+  [[nodiscard]] auto stateSnapshot() const -> QVariantMap;
+
+  /**
+   * @brief Stop the pipeline and release backend state.
    */
   auto shutdown() -> bool;
 
  signals:
-  void audioDevicesChanged();
   void routingError(const QString& message);
-  void streamStarted(AAudioStreamRole role);
-  void streamStopped(AAudioStreamRole role);
-  void volumeChanged(AAudioStreamRole role, int volume);
 
  private:
-  /**
-   * @brief Initialize PipeWire backend
-   */
   auto initializePipeWire() -> bool;
-
-  /**
-   * @brief Ensure a usable backend is available, retrying after startup races.
-   */
-  auto ensureAudioBackendReady(const char* callerTag) -> bool;
-
-  /**
-   * @brief Determine whether enough time has elapsed for a retry.
-   */
-  auto shouldRetryInitialization() const -> bool;
-
-  /**
-   * @brief Initialize PulseAudio backend
-   */
   auto initializePulseAudio() -> bool;
-
-  /**
-   * @brief Select appropriate audio device based on role
-   */
-  QAudioDevice selectAudioDevice(AAudioStreamRole role) const;
-
-  /**
-   * @brief Handle audio device hotplug events
-   */
-  void onAudioDevicesChanged();
-
-  /**
-   * @brief Handle MediaPipeline state changes
-   */
-  void onPipelineStateChanged(bool isActive);
-
-  /**
-   * @brief Convert AASDK audio stream type to router role
-   */
-  static AAudioStreamRole streamTypeToRole(int streamType);
+  auto createMixerSources() -> void;
+  auto applyStoredState() -> void;
+  auto schedulePersist() -> void;
+  auto persistState() -> void;
 
   MediaPipeline* m_mediaPipeline = nullptr;
+  QTimer* m_saveTimer = nullptr;
   bool m_initialized = false;
-
-  // Audio device routing
-  struct StreamConfig {
-    QAudioDevice device;
-    int volumeLevel = 80;
-    bool muted = false;
-    bool active = false;
-  };
-
-  StreamConfig m_mediaConfig;
-  StreamConfig m_guidanceConfig;
-  StreamConfig m_systemConfig;
-
-  // Audio ducking state
-  bool m_duckingEnabled = false;
-  int m_duckingLevel = 40;  // Reduce non-critical streams to 40% during guidance
-
-  // Backend detection
   bool m_pipewireAvailable = false;
   bool m_pulseaudioAvailable = false;
+  QAudioDevice m_preferredDevice;
 
-  // Backend retry bookkeeping (ms since epoch)
-  qint64 m_lastInitializeAttemptMs = 0;
-  qint64 m_lastInitializeFailureLogMs = 0;
+  // Read from the Android Auto transport thread and written from the WebSocket
+  // thread, so these are atomic.
+  std::atomic<int> m_volume{kDefaultVolume};
+  std::atomic<bool> m_muted{false};
+  std::atomic<int> m_balance{0};
+  std::atomic<bool> m_duckingEnabled{true};
+  std::atomic<qint64> m_guidanceActiveUntilMs{0};
 
-  static constexpr qint64 kInitializeRetryIntervalMs = 5000;
-  static constexpr qint64 kInitializeFailureLogIntervalMs = 15000;
+  // Media and system audio stay ducked this long after the last guidance frame.
+  static constexpr qint64 kGuidanceHoldMs = 1000;
 };

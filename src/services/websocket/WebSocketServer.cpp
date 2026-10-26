@@ -33,6 +33,7 @@
 #include <QTimer>
 
 #include "../android_auto/AndroidAutoService.h"
+#include "../audio/AudioRouter.h"
 #include "../config/ConfigService.h"
 #include "../eventbus/EventBus.h"
 #include "../logging/Logger.h"
@@ -448,6 +449,11 @@ void WebSocketServer::handleSubscribe(QWebSocket* client, const QString& topic) 
       Logger::instance().debug(QString("[WebSocketServer]   - %1").arg(sub));
     }
 
+    // Send the current audio state so a new client shows the real volume, mute and balance
+    if (topic == QStringLiteral("audio/state")) {
+      sendAudioStateTo(client);
+    }
+
     // Send current Android Auto state when subscribing to android-auto topics
     if (topic.startsWith("android-auto") && m_serviceManager) {
       AndroidAutoService* aaService = m_serviceManager->getAndroidAutoService();
@@ -669,6 +675,11 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
     }
   }
 
+  if (topic.startsWith(QStringLiteral("audio/")) && m_serviceManager) {
+    handleAudioPublish(topic, payload);
+    return;
+  }
+
   if (topic.startsWith(QStringLiteral("bluetooth/")) && m_serviceManager) {
     BluetoothManager* bluetoothManager = m_serviceManager->getBluetoothManager();
     if (!bluetoothManager) {
@@ -786,6 +797,86 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
   }
 
   EventBus::instance().publish(topic, payload);
+}
+
+namespace {
+
+QVariantMap audioStateOrUnavailable(const AudioRouter* router) {
+  if (!router) {
+    QVariantMap unavailable;
+    unavailable[QStringLiteral("available")] = false;
+    return unavailable;
+  }
+  return router->stateSnapshot();
+}
+
+}  // namespace
+
+void WebSocketServer::handleAudioPublish(const QString& topic, const QVariantMap& payload) {
+  // Audio control is publish-based, like bluetooth/*. Each topic takes one named
+  // value. Invalid input is rejected here, before it reaches the router.
+  AudioRouter* router = m_serviceManager->getAudioRouter();
+
+  bool accepted = false;
+  QString reason = QStringLiteral("invalid_payload");
+
+  if (!router) {
+    reason = QStringLiteral("audio_unavailable");
+  } else if (topic == QStringLiteral("audio/volume/set")) {
+    bool ok = false;
+    const int volume = payload.value(QStringLiteral("volume")).toInt(&ok);
+    if (ok) {
+      accepted = router->setVolume(volume);
+      reason = QStringLiteral("out_of_range");
+    }
+  } else if (topic == QStringLiteral("audio/mute/set")) {
+    const QVariant muted = payload.value(QStringLiteral("muted"));
+    if (muted.typeId() == QMetaType::Bool) {
+      accepted = router->setMuted(muted.toBool());
+    }
+  } else if (topic == QStringLiteral("audio/balance/set")) {
+    bool ok = false;
+    const int balance = payload.value(QStringLiteral("balance")).toInt(&ok);
+    if (ok) {
+      accepted = router->setBalance(balance);
+      reason = QStringLiteral("out_of_range");
+    }
+  } else if (topic == QStringLiteral("audio/ducking/set")) {
+    const QVariant enabled = payload.value(QStringLiteral("enabled"));
+    if (enabled.typeId() == QMetaType::Bool) {
+      accepted = router->enableAudioDucking(enabled.toBool());
+    }
+  } else {
+    reason = QStringLiteral("unknown_audio_topic");
+  }
+
+  if (!accepted) {
+    Logger::instance().warning(QString("[WebSocketServer] Audio command rejected: %1 (%2)")
+                                   .arg(topic)
+                                   .arg(reason));
+    QVariantMap rejection;
+    rejection[QStringLiteral("topic")] = topic;
+    rejection[QStringLiteral("reason")] = reason;
+    broadcastEvent(QStringLiteral("audio/command_rejected"), rejection);
+    return;
+  }
+
+  broadcastEvent(QStringLiteral("audio/state"), router->stateSnapshot());
+}
+
+void WebSocketServer::sendAudioStateTo(QWebSocket* client) const {
+  if (!client) {
+    return;
+  }
+
+  AudioRouter* router = m_serviceManager ? m_serviceManager->getAudioRouter() : nullptr;
+
+  QJsonObject obj;
+  obj["type"] = "event";
+  obj["topic"] = "audio/state";
+  obj["payload"] = QJsonObject::fromVariantMap(audioStateOrUnavailable(router));
+  obj["timestamp"] = QDateTime::currentSecsSinceEpoch();
+  client->sendTextMessage(QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
 
 void WebSocketServer::handleServiceCommand(QWebSocket* client, const QString& command,

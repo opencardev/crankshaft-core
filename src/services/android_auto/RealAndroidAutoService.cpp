@@ -7917,9 +7917,7 @@ void RealAndroidAutoService::routeGuidanceAudioToVehicle(const QByteArray& audio
     return;
   }
 
-  // Enable audio ducking when guidance is active (reduces other streams to 40%)
-  m_audioRouter->enableAudioDucking(true);
-
+  // Ducking is driven by the router itself: guidance frames hold it open briefly.
   if (!m_audioRouter->routeAudioFrame(AAudioStreamRole::GUIDANCE, audioData)) {
     Logger::instance().warning("[RealAndroidAutoService] Failed to route guidance audio");
   }

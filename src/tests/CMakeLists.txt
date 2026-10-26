@@ -3,6 +3,7 @@
 add_executable(crankshaft-core-tests
     test_main.cpp
     test_audio_router.cpp
+    test_audio_math.cpp
     test_aasdk_error_classification.cpp
     test_android_auto_transport_mode.cpp
     test_websocket_client_contract.cpp

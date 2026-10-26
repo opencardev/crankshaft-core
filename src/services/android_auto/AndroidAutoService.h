@@ -28,6 +28,7 @@
 #include <memory>
 
 // Forward declarations
+class AudioRouter;
 class MediaPipeline;
 class ProfileManager;
 class IWirelessNetworkManager;
@@ -101,6 +102,15 @@ class AndroidAutoService : public QObject {
    */
   virtual void setWirelessNetworkManager(
       const std::shared_ptr<IWirelessNetworkManager>& manager);
+
+  /**
+   * @brief Audio router that owns Android Auto playback and user audio controls.
+   *
+   * Default returns nullptr for services without audio output (mock/legacy).
+   */
+  virtual AudioRouter* audioRouter() const {
+    return nullptr;
+  }
 
   /**
    * @brief Initialise the Android Auto service

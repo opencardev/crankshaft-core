@@ -331,6 +331,10 @@ class WebSocketServer : public QObject {
   void handleUnsubscribe(QWebSocket* client, const QString& topic);
   /// Handle event publication from internal service
   void handlePublish(const QString& topic, const QVariantMap& payload);
+  /// Handle audio/* control commands (volume, mute, balance, ducking) and broadcast the result
+  void handleAudioPublish(const QString& topic, const QVariantMap& payload);
+  /// Send the current audio state to one client (used on subscribe to audio/state)
+  void sendAudioStateTo(QWebSocket* client) const;
   /// Handle localhost-only admin API requests from provisioning UI
   void handleAdminApiRequest(QWebSocket* client, const QJsonObject& request);
   /// Route service command to appropriate service handler
