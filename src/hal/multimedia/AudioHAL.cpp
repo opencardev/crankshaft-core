@@ -247,6 +247,8 @@ bool AudioHAL::setVolume(int volume) {
     double gstVolume = volume / 100.0;
     g_object_set(G_OBJECT(d->volume), "volume", gstVolume, nullptr);
     qDebug() << "Audio volume set to" << volume << "%";
+    // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+    // cppcheck-suppress shadowFunction
     emit volumeChanged(volume);
     return true;
   }
@@ -264,6 +266,8 @@ bool AudioHAL::setMute(bool muted) {
   if (d->volume) {
     g_object_set(G_OBJECT(d->volume), "mute", muted, nullptr);
     qDebug() << "Audio mute set to" << muted;
+    // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+    // cppcheck-suppress shadowFunction
     emit muteChanged(muted);
     return true;
   }
@@ -365,6 +369,8 @@ bool AudioHAL::startStream(const QString& streamName, int sampleRate, int channe
 
   qDebug() << "Audio stream started:" << streamName << "(" << sampleRate << "Hz," << channels
            << "channels)";
+  // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+  // cppcheck-suppress shadowFunction
   emit streamStarted(streamName);
   return true;
 }
@@ -381,6 +387,8 @@ bool AudioHAL::stopStream(const QString& streamName) {
   }
 
   qDebug() << "Audio stream stopped:" << streamName;
+  // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+  // cppcheck-suppress shadowFunction
   emit streamStopped(streamName);
   return true;
 }
