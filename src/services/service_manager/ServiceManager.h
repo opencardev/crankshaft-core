@@ -29,6 +29,7 @@ class AndroidAutoService;
 class WiFiManager;
 class BluetoothManager;
 class MediaPipeline;
+class AudioRouter;
 struct DeviceConfig;
 
 /**
@@ -111,6 +112,8 @@ class ServiceManager : public QObject {
   MediaPipeline* getMediaPipeline() const {
     return m_mediaPipeline;
   }
+  /** @brief Audio router that owns playback and user audio controls, or nullptr if unavailable. */
+  AudioRouter* getAudioRouter() const;
 
   void setWiFiManagerFactoryForTesting(WiFiManagerFactory factory) {
     m_wifiManagerFactory = std::move(factory);

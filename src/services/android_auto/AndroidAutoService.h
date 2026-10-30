@@ -28,6 +28,7 @@
 #include <memory>
 
 // Forward declarations
+class AudioRouter;
 class MediaPipeline;
 class ProfileManager;
 class IWirelessNetworkManager;
@@ -101,6 +102,15 @@ class AndroidAutoService : public QObject {
    */
   virtual void setWirelessNetworkManager(
       const std::shared_ptr<IWirelessNetworkManager>& manager);
+
+  /**
+   * @brief Audio router that owns Android Auto playback and user audio controls.
+   *
+   * Default returns nullptr for services without audio output (mock/legacy).
+   */
+  virtual AudioRouter* audioRouter() const {
+    return nullptr;
+  }
 
   /**
    * @brief Initialise the Android Auto service
@@ -270,9 +280,19 @@ class AndroidAutoService : public QObject {
   void videoEncodedFrameReady(int width, int height, const QByteArray& frameData);
 
   /**
-   * @brief Emitted when audio data is available
+   * @brief Emitted for each Android Auto audio frame once it has been routed
+   * @param stream Source name: "media", "guidance", "system" or "telephony"
+   * @param sampleRate Sample rate of the frame in Hz
+   * @param channels Channel count of the frame (interleaved S16LE)
+   * @param data PCM samples as played
    */
-  void audioDataReady(const QByteArray& data);
+  void audioFrameRouted(const QString& stream, int sampleRate, int channels,
+                        const QByteArray& data);
+
+  /**
+   * @brief Emitted when audio state a client can see changes, such as the output list
+   */
+  void audioStateChanged();
 
   /**
    * @brief Emitted when service error occurs

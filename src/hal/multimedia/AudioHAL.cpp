@@ -23,18 +23,32 @@
 #include <gst/gst.h>
 
 #include <QDebug>
+#include <QHash>
+
+namespace {
+
+// Every source is converted to this rate before it reaches the mixer.
+constexpr int kMixRate = 48000;
+
+// A live source with no data is waited on for at most this long, so one idle
+// channel (for example guidance between prompts) does not stall the others.
+constexpr guint64 kMixerLatencyNs = 40ULL * 1000 * 1000;
+
+}  // namespace
 
 class AudioHAL::AudioHALPrivate {
  public:
   GstElement* pipeline = nullptr;
-  GstElement* source = nullptr;
-  GstElement* convert = nullptr;
-  GstElement* volume = nullptr;
+  GstElement* mixer = nullptr;
+  GstElement* volume = nullptr;  // master volume and mute, after the mixer
   GstElement* sink = nullptr;
   GstBus* bus = nullptr;
   guint busWatchId = 0;
 
-  AudioHAL::AudioRoute currentRoute = AudioHAL::AudioRoute::Default;
+  // Source name to the appsrc that feeds it.
+  QHash<QString, GstElement*> sources;
+
+  QString outputDevice;  // empty = system default sink
   int currentVolume = 50;
   bool isMuted = false;
 
@@ -92,38 +106,34 @@ AudioHAL::~AudioHAL() {
 }
 
 bool AudioHAL::initializePipeline() {
-  // Create pipeline elements
+  // Graph: [sources] -> audiomixer -> volume (master) -> sink
   d->pipeline = gst_pipeline_new("audio-pipeline");
-  d->source = gst_element_factory_make("appsrc", "audio-source");
-  d->convert = gst_element_factory_make("audioconvert", "converter");
+  d->mixer = gst_element_factory_make("audiomixer", "audio-mixer");
   d->volume = gst_element_factory_make("volume", "volume-control");
   d->sink = gst_element_factory_make("autoaudiosink", "audio-sink");
 
-  if (!d->pipeline || !d->source || !d->convert || !d->volume || !d->sink) {
+  if (!d->pipeline || !d->mixer || !d->volume || !d->sink) {
     qCritical() << "Failed to create GStreamer audio elements";
     cleanup();
     return false;
   }
 
-  // Build the pipeline
-  gst_bin_add_many(GST_BIN(d->pipeline), d->source, d->convert, d->volume, d->sink, nullptr);
+  gst_bin_add_many(GST_BIN(d->pipeline), d->mixer, d->volume, d->sink, nullptr);
 
-  if (!gst_element_link_many(d->source, d->convert, d->volume, d->sink, nullptr)) {
+  if (!gst_element_link_many(d->mixer, d->volume, d->sink, nullptr)) {
     qCritical() << "Failed to link GStreamer audio elements";
     cleanup();
     return false;
   }
+
+  g_object_set(G_OBJECT(d->mixer), "latency", kMixerLatencyNs, nullptr);
 
   // Set up bus monitoring
   d->bus = gst_pipeline_get_bus(GST_PIPELINE(d->pipeline));
   d->busWatchId = gst_bus_add_watch(d->bus, AudioHALPrivate::busCallback, this);
   gst_object_unref(d->bus);
 
-  // Configure appsrc
-  g_object_set(G_OBJECT(d->source), "stream-type", 0,  // GST_APP_STREAM_TYPE_STREAM
-               "format", GST_FORMAT_TIME, "is-live", TRUE, nullptr);
-
-  // Set initial volume
+  // Set initial volume and mute on the master stage
   setVolume(d->currentVolume);
 
   qDebug() << "Audio pipeline initialized successfully";
@@ -140,11 +150,89 @@ void AudioHAL::cleanup() {
     gst_element_set_state(d->pipeline, GST_STATE_NULL);
     gst_object_unref(d->pipeline);
     d->pipeline = nullptr;
-    d->source = nullptr;
-    d->convert = nullptr;
+    d->mixer = nullptr;
     d->volume = nullptr;
     d->sink = nullptr;
+    d->sources.clear();
   }
+}
+
+bool AudioHAL::addSource(const QString& name, int sampleRate) {
+  if (!d->pipeline || !d->mixer) {
+    qWarning() << "Audio pipeline not initialized; cannot add source" << name;
+    return false;
+  }
+
+  if (d->sources.contains(name)) {
+    return true;
+  }
+
+  GstElement* appsrc = gst_element_factory_make("appsrc", nullptr);
+  GstElement* convert = gst_element_factory_make("audioconvert", nullptr);
+  GstElement* resample = gst_element_factory_make("audioresample", nullptr);
+  GstElement* filter = gst_element_factory_make("capsfilter", nullptr);
+  if (!appsrc || !convert || !resample || !filter) {
+    qCritical() << "Failed to create elements for audio source" << name;
+    for (GstElement* element : {appsrc, convert, resample, filter}) {
+      if (element) {
+        gst_object_unref(element);
+      }
+    }
+    return false;
+  }
+
+  // Input is stereo S16LE at the source's own rate. Pushes are live and carry
+  // no timestamps, so the appsrc stamps them on the pipeline clock.
+  GstCaps* inputCaps =
+      gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE", "layout",
+                          G_TYPE_STRING, "interleaved", "rate", G_TYPE_INT, sampleRate, "channels",
+                          G_TYPE_INT, 2, nullptr);
+  GstCaps* mixCaps =
+      gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE", "layout",
+                          G_TYPE_STRING, "interleaved", "rate", G_TYPE_INT, kMixRate, "channels",
+                          G_TYPE_INT, 2, nullptr);
+
+  g_object_set(G_OBJECT(appsrc), "caps", inputCaps, "format", GST_FORMAT_TIME, "is-live", TRUE,
+               "do-timestamp", TRUE, nullptr);
+  g_object_set(G_OBJECT(filter), "caps", mixCaps, nullptr);
+  gst_caps_unref(inputCaps);
+  gst_caps_unref(mixCaps);
+
+  // The bin owns the elements once they are added. On failure they are removed
+  // again, so nothing is left in the pipeline that is not a source.
+  gst_bin_add_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
+  if (!gst_element_link_many(appsrc, convert, resample, filter, nullptr)) {
+    qCritical() << "Failed to link audio source" << name;
+    gst_bin_remove_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
+    return false;
+  }
+
+  GstPad* mixerPad = gst_element_request_pad_simple(d->mixer, "sink_%u");
+  GstPad* filterSrcPad = gst_element_get_static_pad(filter, "src");
+  const bool linked = mixerPad && filterSrcPad &&
+                      gst_pad_link(filterSrcPad, mixerPad) == GST_PAD_LINK_OK;
+  if (filterSrcPad) {
+    gst_object_unref(filterSrcPad);
+  }
+  if (!linked) {
+    qCritical() << "Failed to connect audio source to mixer:" << name;
+    if (mixerPad) {
+      gst_element_release_request_pad(d->mixer, mixerPad);
+      gst_object_unref(mixerPad);
+    }
+    gst_bin_remove_many(GST_BIN(d->pipeline), appsrc, convert, resample, filter, nullptr);
+    return false;
+  }
+  gst_object_unref(mixerPad);
+
+  // If the pipeline is already playing, the new elements must follow it.
+  for (GstElement* element : {appsrc, convert, resample, filter}) {
+    gst_element_sync_state_with_parent(element);
+  }
+
+  d->sources.insert(name, appsrc);
+  qDebug() << "Audio source added:" << name << sampleRate << "Hz";
+  return true;
 }
 
 bool AudioHAL::setVolume(int volume) {
@@ -159,6 +247,8 @@ bool AudioHAL::setVolume(int volume) {
     double gstVolume = volume / 100.0;
     g_object_set(G_OBJECT(d->volume), "volume", gstVolume, nullptr);
     qDebug() << "Audio volume set to" << volume << "%";
+    // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+    // cppcheck-suppress shadowFunction
     emit volumeChanged(volume);
     return true;
   }
@@ -176,6 +266,8 @@ bool AudioHAL::setMute(bool muted) {
   if (d->volume) {
     g_object_set(G_OBJECT(d->volume), "mute", muted, nullptr);
     qDebug() << "Audio mute set to" << muted;
+    // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+    // cppcheck-suppress shadowFunction
     emit muteChanged(muted);
     return true;
   }
@@ -187,66 +279,77 @@ bool AudioHAL::isMuted() const {
   return d->isMuted;
 }
 
-bool AudioHAL::setRoute(AudioRoute route) {
-  d->currentRoute = route;
-
-  // Route-specific configuration
-  QString sinkName;
-  switch (route) {
-    case AudioRoute::Speakers:
-      sinkName = "alsasink";
-      break;
-    case AudioRoute::Headphones:
-      sinkName = "alsasink";  // Could be configured differently
-      break;
-    case AudioRoute::Bluetooth:
-      sinkName = "pulsesink";  // Typically uses PulseAudio for Bluetooth
-      break;
-    case AudioRoute::USB:
-      sinkName = "alsasink";
-      break;
-    case AudioRoute::Default:
-    default:
-      sinkName = "autoaudiosink";
-      break;
+bool AudioHAL::setOutputDevice(const QString& sinkName) {
+  if (!d->pipeline || !d->volume) {
+    qWarning() << "Audio pipeline not initialized; cannot select output" << sinkName;
+    return false;
   }
 
-  // Recreate sink with new type
-  if (d->pipeline && d->sink) {
-    GstState state;
-    gst_element_get_state(d->pipeline, &state, nullptr, GST_CLOCK_TIME_NONE);
+  if (sinkName == d->outputDevice) {
+    return true;
+  }
 
-    // Stop pipeline
+  // Swap the sink with the pipeline stopped, then restart it in its previous state.
+  // Going to READY only connects to the sound server. The stream for the device is
+  // created later, when playback starts, so a missing device is caught by the
+  // router's listing check, not here.
+  auto replaceSink = [this](const char* factoryName, const QString& device) -> bool {
+    GstState previous = GST_STATE_NULL;
+    gst_element_get_state(d->pipeline, &previous, nullptr, GST_CLOCK_TIME_NONE);
     gst_element_set_state(d->pipeline, GST_STATE_NULL);
 
-    // Remove old sink
-    gst_bin_remove(GST_BIN(d->pipeline), d->sink);
-
-    // Create new sink
-    d->sink = gst_element_factory_make(sinkName.toUtf8().constData(), "audio-sink");
-    if (!d->sink) {
-      qCritical() << "Failed to create audio sink:" << sinkName;
-      return false;
+    if (d->sink) {
+      gst_bin_remove(GST_BIN(d->pipeline), d->sink);  // drops the old sink
+      d->sink = nullptr;
     }
 
-    // Add and link new sink
-    gst_bin_add(GST_BIN(d->pipeline), d->sink);
-    if (!gst_element_link(d->volume, d->sink)) {
-      qCritical() << "Failed to link audio sink";
-      return false;
+    bool ok = false;
+    GstElement* sink = gst_element_factory_make(factoryName, "audio-sink");
+    if (!sink) {
+      qCritical() << "Failed to create audio sink" << factoryName;
+    } else {
+      if (!device.isEmpty()) {
+        g_object_set(G_OBJECT(sink), "device", device.toUtf8().constData(), nullptr);
+      }
+      gst_bin_add(GST_BIN(d->pipeline), sink);
+
+      const bool linked = gst_element_link(d->volume, sink);
+      if (linked && gst_element_set_state(sink, GST_STATE_READY) != GST_STATE_CHANGE_FAILURE) {
+        d->sink = sink;
+        ok = true;
+      } else {
+        qCritical() << "Audio sink" << factoryName << "cannot be used for" << device;
+        if (linked) {
+          gst_element_unlink(d->volume, sink);
+        }
+        gst_bin_remove(GST_BIN(d->pipeline), sink);
+      }
     }
 
-    // Restore pipeline state
-    gst_element_set_state(d->pipeline, state);
+    gst_element_set_state(d->pipeline, previous);
+    return ok;
+  };
+
+  if (!sinkName.isEmpty() && replaceSink("pulsesink", sinkName)) {
+    d->outputDevice = sinkName;
+    qDebug() << "Audio output set to" << sinkName;
+    return true;
   }
 
-  qDebug() << "Audio route changed to" << static_cast<int>(route);
-  emit routeChanged(route);
-  return true;
+  if (!sinkName.isEmpty()) {
+    qWarning() << "Audio output" << sinkName << "unavailable; using the system default";
+  }
+
+  const bool restored = replaceSink("autoaudiosink", QString());
+  if (!restored) {
+    qCritical() << "Failed to restore the default audio output";
+  }
+  d->outputDevice.clear();
+  return sinkName.isEmpty() && restored;
 }
 
-AudioHAL::AudioRoute AudioHAL::getCurrentRoute() const {
-  return d->currentRoute;
+QString AudioHAL::outputDevice() const {
+  return d->outputDevice;
 }
 
 bool AudioHAL::startStream(const QString& streamName, int sampleRate, int channels) {
@@ -255,14 +358,8 @@ bool AudioHAL::startStream(const QString& streamName, int sampleRate, int channe
     return false;
   }
 
-  // Configure caps for the stream
-  GstCaps* caps =
-      gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE", "rate", G_TYPE_INT,
-                          sampleRate, "channels", G_TYPE_INT, channels, nullptr);
-
-  g_object_set(G_OBJECT(d->source), "caps", caps, nullptr);
-  gst_caps_unref(caps);
-
+  // Sources carry their own format (see addSource), so starting only needs the
+  // pipeline to reach PLAYING.
   // Start pipeline
   GstStateChangeReturn ret = gst_element_set_state(d->pipeline, GST_STATE_PLAYING);
   if (ret == GST_STATE_CHANGE_FAILURE) {
@@ -272,6 +369,8 @@ bool AudioHAL::startStream(const QString& streamName, int sampleRate, int channe
 
   qDebug() << "Audio stream started:" << streamName << "(" << sampleRate << "Hz," << channels
            << "channels)";
+  // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+  // cppcheck-suppress shadowFunction
   emit streamStarted(streamName);
   return true;
 }
@@ -288,12 +387,16 @@ bool AudioHAL::stopStream(const QString& streamName) {
   }
 
   qDebug() << "Audio stream stopped:" << streamName;
+  // Qt's emit macro is not visible to cppcheck, which reads the next line as a declaration.
+  // cppcheck-suppress shadowFunction
   emit streamStopped(streamName);
   return true;
 }
 
-bool AudioHAL::pushAudioData(const QByteArray& data) {
-  if (!d->source) {
+bool AudioHAL::pushAudioData(const QString& source, const QByteArray& data) {
+  GstElement* appsrc = d->sources.value(source, nullptr);
+  if (!appsrc) {
+    qWarning() << "Unknown audio source:" << source;
     return false;
   }
 
@@ -304,8 +407,8 @@ bool AudioHAL::pushAudioData(const QByteArray& data) {
   memcpy(map.data, data.constData(), data.size());
   gst_buffer_unmap(buffer, &map);
 
-  // Push buffer to appsrc
-  GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(d->source), buffer);
+  // Push buffer to this source's appsrc
+  GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
 
   if (ret != GST_FLOW_OK) {
     qWarning() << "Failed to push audio data, flow return:" << ret;
@@ -315,32 +418,3 @@ bool AudioHAL::pushAudioData(const QByteArray& data) {
   return true;
 }
 
-QStringList AudioHAL::getAvailableDevices() const {
-  QStringList devices;
-
-  // Use GStreamer device monitor to list audio devices
-  GstDeviceMonitor* monitor = gst_device_monitor_new();
-
-  gst_device_monitor_add_filter(monitor, "Audio/Sink", nullptr);
-
-  if (!gst_device_monitor_start(monitor)) {
-    qWarning() << "Failed to start device monitor";
-    gst_object_unref(monitor);
-    return devices;
-  }
-
-  GList* deviceList = gst_device_monitor_get_devices(monitor);
-  for (GList* item = deviceList; item != nullptr; item = item->next) {
-    GstDevice* device = GST_DEVICE(item->data);
-    gchar* name = gst_device_get_display_name(device);
-    devices.append(QString::fromUtf8(name));
-    g_free(name);
-    gst_object_unref(device);
-  }
-  g_list_free(deviceList);
-
-  gst_device_monitor_stop(monitor);
-  gst_object_unref(monitor);
-
-  return devices;
-}

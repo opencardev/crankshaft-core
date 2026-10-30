@@ -3,7 +3,7 @@
 ## 1. Purpose and Scope
 
 - Provide Bluetooth device management (enable/disable, scan, pair, connect, disconnect).
-- Support Bluetooth audio-device workflows and route selection through core audio services.
+- Connect Bluetooth audio devices. Their outputs are chosen in the core audio output list (see ADR-0005), alongside direct-attached outputs.
 - Expose Bluetooth operations/events to UI clients through websocket topics.
 
 Out of scope:
@@ -15,30 +15,30 @@ Out of scope:
 
 - HAL layer: `BluetoothHAL` for BlueZ DBus interactions.
 - Manager interface: `BluetoothManager` abstraction, with functional implementation used by `ServiceManager`.
-- Service layer: `BluetoothService` coordinates preferences and audio routing.
+- Audio output: Bluetooth sinks appear in the `AudioRouter` output list (`audio/state`). The Bluetooth layer does not route audio; the user selects the output.
 - Event/API bridge: websocket topic handlers under `bluetooth/*`.
 
 ## 3. Architecture Summary
 
-Bluetooth support is layered: low-level DBus adapter/device operations in `BluetoothHAL`, service-friendly operations in `BluetoothManager` implementations, and cross-service orchestration in `BluetoothService`. The service layer handles discovery timeout policy, selected-device persistence, and attempts to route media output using `AudioRouter` after connect.
+Bluetooth support is layered: low-level DBus adapter/device operations in `BluetoothHAL`, and service-friendly operations in `BluetoothManager` implementations. Discovery timeout policy lives in the manager. A connected Bluetooth speaker appears as a PulseAudio sink (`bluez_output.*`), and `AudioRouter` lists it. Audio goes to it only when the user selects it.
 
 ## 4. Component Map
 
 | Component | File(s) | Responsibility |
 | --- | --- | --- |
-| Bluetooth service API | `src/services/bluetooth/BluetoothService.h`, `src/services/bluetooth/BluetoothService.cpp` | Discovery/pair/connect orchestration and audio routing handoff |
 | Manager abstraction | `src/hal/wireless/BluetoothManager.h`, `src/hal/wireless/BluetoothManager.cpp` | Interface contract for Bluetooth operations |
 | BlueZ HAL | `src/hal/wireless/BluetoothHAL.h`, `src/hal/wireless/BluetoothHAL.cpp` | DBus adapter and device operations |
 | Service lifecycle | `src/services/service_manager/ServiceManager.cpp` | Starts/stops Bluetooth manager based on profile or fallback |
 | Remote command path | `src/services/websocket/WebSocketServer.cpp` | Handles `bluetooth/*` control topics |
+| Output selection | `src/services/audio/AudioRouter.cpp`, `src/services/audio/AudioOutputs.cpp`, `src/hal/multimedia/AudioHAL.cpp` | Lists sinks, applies the chosen output, and reconciles on hot-plug |
 
 ## 5. Runtime Sequence
 
 1. `ServiceManager` starts Bluetooth manager when profile includes Bluetooth (or fallback start via websocket request).
-2. `BluetoothService::initialize()` reads timeout config and persisted selected device.
+2. The manager reads the discovery timeout config.
 3. Discovery starts/stops with timeout enforcement.
 4. Pair/connect operations are delegated to manager.
-5. On successful connect, `BluetoothService` attempts `AudioRouter` device routing and persists selected device.
+5. On successful connect, the device's sink appears in the next audio output listing (within about 5 seconds). Audio is not moved to it automatically.
 
 Shutdown:
 
@@ -56,12 +56,12 @@ Shutdown:
 
 - Device discovery results filtered for audio-relevant devices.
 - Pair/connect requests executed through manager.
-- Audio routing handoff via `AudioRouter::setAudioDevice(...)`.
-- Preference persistence through `PreferencesService` for selected audio endpoint.
+- Output choice is made through the `audio/output/set` topic, not by the Bluetooth layer. The choice is persisted as `core.audio.output`.
 
 ### 6.3 Outbound Outputs
 
-- Service signals (`deviceDiscovered`, `devicePaired`, `audioRoutingError`, etc.).
+- Manager signals (`deviceDiscovered`, `devicePaired`, etc.).
+- Audio output events: `audio/state` after every output change, with `outputs`, `output` and `active_output`.
 - Websocket result events (`bluetooth/*/result`).
 - Structured logs from Bluetooth service and websocket layers.
 
@@ -70,13 +70,13 @@ Shutdown:
 | Key | Default | Effect | Notes |
 | --- | --- | --- | --- |
 | `core.bluetooth.discovery_timeout_seconds` | 60 | Auto-stop discovery after timeout | Set to `0` to disable timeout behavior |
-| `bluetooth/selectedAudioDevice` (preference key) | empty | Remember preferred output device | Stored/read via `PreferencesService` |
+| `core.audio.output` | empty | Chosen audio output (empty = system default) | Set with `audio/output/set`; applies to direct and Bluetooth outputs |
 
 ## 8. External Dependencies
 
 - BlueZ services on system DBus.
 - Qt DBus and Qt Bluetooth support.
-- `AudioRouter` availability for routing integration.
+- PipeWire or PulseAudio with the `pactl` tool, for listing audio outputs.
 
 Runtime assumptions:
 
@@ -87,14 +87,15 @@ Runtime assumptions:
 
 Logs to watch:
 
-- `[BluetoothService] Initialized`
-- `[BluetoothService] Discovery started...`
-- `[BluetoothService] Failed to connect to device ...`
+- `[AudioRouter] Audio outputs changed: ...`
+- `[AudioRouter] Audio output: ...`
+- `[AudioRouter] Could not open audio output ...`
 - `[WebSocketServer] Bluetooth scan started; timeout in ...`
 
 Checks:
 
-- `journalctl -u crankshaft-core -b | grep -E "BluetoothService|bluetooth|WebSocketServer"`
+- `journalctl -u crankshaft-core -b | grep -E "AudioRouter|bluetooth|WebSocketServer"`
+- `pactl list short sinks` (the sink names that appear in `audio/state`)
 - `bluetoothctl show`
 - `bluetoothctl devices`
 
@@ -104,7 +105,7 @@ Checks:
 | --- | --- | --- | --- |
 | Scan does not return devices | Adapter unavailable or discovery failure | No `deviceDiscovered` events, scan result shows failure | Validate adapter state and DBus availability |
 | Pair/connect fails repeatedly | Remote device rejects pairing/profile mismatch | `bluetooth/*/result` success false and service warnings | Remove stale pairing, retry from clean state, verify profiles |
-| Audio not routed after connect | Router/device-id mismatch or backend unavailable | Routing error emitted after connect | Check `AudioRouter` backend status and mapping logic |
+| Speaker connected but audio plays elsewhere | Output not selected, or the sink is not listed | `audio/state` has the `bluez_output.*` sink in `outputs` but `active_output` is empty or different | Select the speaker in the audio output list; check `pactl list short sinks` |
 
 ## 11. Security and Safety Notes
 
@@ -127,10 +128,11 @@ Manual checklist:
 
 ## 13. Known Gaps and Follow-ups
 
-- `BluetoothService::getDiscoveredAudioDevices()` currently contains a duplicated device-type condition and should be cleaned up for clarity.
+- Routing to a Bluetooth output automatically when it connects is not implemented. The choice is manual (ADR-0005).
 - Add explicit profile-level validation for A2DP/HFP route compatibility before routing.
 - Add richer telemetry for pairing/connection failure categories.
 
 ## 14. Change Log Notes
 
 - 2026-06: Added comprehensive Bluetooth architecture documentation with service, manager, HAL, and websocket control-path coverage.
+- 2026-10: Removed `BluetoothService`, which was never constructed. Output selection moved to `AudioRouter` (ADR-0005).
